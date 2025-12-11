@@ -45,7 +45,7 @@ class _ReflexGameState extends State<ReflexGame> {
 
       final response = await http
           .post(
-            Uri.parse('http://10.0.2.2:8000/calculate-score'),
+            Uri.parse('https://nutrichoice-xvpf.onrender.com/calculate-score'),
             headers: {"Content-Type": "application/json"},
             body: jsonEncode(data),
           )

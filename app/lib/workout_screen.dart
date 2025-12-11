@@ -218,7 +218,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
 
     try {
       final response = await http.post(
-        Uri.parse('http://10.0.2.2:8000/generate-workout'),
+        Uri.parse('https://nutrichoice-xvpf.onrender.com/generate-workout'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({"context": promptContext}),
       );
@@ -429,13 +429,13 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
             child: _isLoading
                 ? const Center(child: CircularProgressIndicator(color: Colors.indigoAccent))
                 : _workoutPlan.isEmpty
-                    ? Center(
+                    ? const Center(
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Icon(Icons.fitness_center, size: 60, color: Colors.white10),
-                            const SizedBox(height: 10),
-                            const Text("Configure & Generate", style: TextStyle(color: Colors.white24)),
+                            SizedBox(height: 10),
+                            Text("Configure & Generate", style: TextStyle(color: Colors.white24)),
                           ],
                         ),
                       )

@@ -84,7 +84,7 @@ class _MealLogScreenState extends State<MealLogScreen> {
 
     try {
       final response = await http.post(
-        Uri.parse('http://10.0.2.2:8000/log-meal'),
+        Uri.parse('https://nutrichoice-xvpf.onrender.com/log-meal'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "meal_description": _textController.text,
@@ -116,7 +116,7 @@ class _MealLogScreenState extends State<MealLogScreen> {
 
   Future<void> _analyzeFoodImage(File image) async {
     try {
-      var request = http.MultipartRequest('POST', Uri.parse('http://10.0.2.2:8000/snap-meal'));
+      var request = http.MultipartRequest('POST', Uri.parse('https://nutrichoice-xvpf.onrender.com/snap-meal'));
       request.files.add(await http.MultipartFile.fromPath('file', image.path));
       request.fields['user_goal'] = "Maintain";
 
@@ -274,7 +274,7 @@ class _MealLogScreenState extends State<MealLogScreen> {
           // 3. LIST
           Expanded(
             child: _mealHistory.isEmpty
-                ? Center(child: Text("No meals logged yet.", style: TextStyle(color: Colors.grey)))
+                ? const Center(child: Text("No meals logged yet.", style: TextStyle(color: Colors.grey)))
                 : ListView.builder(
                     padding: const EdgeInsets.all(16),
                     itemCount: _mealHistory.length,

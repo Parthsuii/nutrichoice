@@ -132,7 +132,7 @@ class _BioCheckinScreenState extends State<BioCheckinScreen> {
                 Text("${_sleepHours.toStringAsFixed(1)} hrs", style: const TextStyle(color: Colors.tealAccent, fontSize: 24, fontWeight: FontWeight.bold)),
                 Expanded(
                   child: Slider(
-                    value: _sleepHours,
+                    value:_sleepHours.clamp(3.0,12.0),
                     min: 3.0,
                     max: 12.0,
                     divisions: 18,

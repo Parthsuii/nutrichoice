@@ -110,7 +110,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
       }
 
       final response = await http.post(
-        Uri.parse('http://10.0.2.2:8000/generate-meal-plan'),
+        Uri.parse('https://nutrichoice-xvpf.onrender.com/generate-meal-plan'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "user_goal": _userGoal,
@@ -151,7 +151,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Swapping meal...")));
     try {
       final response = await http.post(
-        Uri.parse('http://10.0.2.2:8000/swap-meal'),
+        Uri.parse('https://nutrichoice-xvpf.onrender.com/swap-meal'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "user_goal": _userGoal,

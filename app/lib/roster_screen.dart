@@ -114,7 +114,7 @@ class _RosterScreenState extends State<RosterScreen> {
   Future<void> _uploadImageForAnalysis(File imageFile) async {
     setState(() => _isScanning = true);
     try {
-      var request = http.MultipartRequest('POST', Uri.parse('http://10.0.2.2:8000/analyze-roster'));
+      var request = http.MultipartRequest('POST', Uri.parse('https://nutrichoice-xvpf.onrender.com/analyze-roster'));
       request.files.add(await http.MultipartFile.fromPath('file', imageFile.path));
       var response = await http.Response.fromStream(await request.send());
 

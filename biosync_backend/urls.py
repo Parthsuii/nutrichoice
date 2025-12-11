@@ -16,7 +16,18 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path
+from app import views  # <--- Import your views from the 'app' folder
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+
+    # --- API Endpoints (Matches your Flutter App) ---
+    path('analyze-roster', views.analyze_roster, name='analyze_roster'),
+    path('log-meal', views.log_meal, name='log_meal'),
+    path('snap-meal', views.snap_meal, name='snap_meal'),
+    path('calculate-score', views.calculate_score, name='calculate_score'),
+    path('compare-prices', views.compare_prices, name='compare_prices'),
+    path('generate-meal-plan', views.generate_meal_plan, name='generate_meal_plan'),
+    path('swap-meal', views.swap_meal, name='swap_meal'),
+    path('generate-workout', views.generate_workout, name='generate_workout'),
 ]
