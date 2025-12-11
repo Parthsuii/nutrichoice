@@ -1,7 +1,9 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework.generics import ListCreateAPIView
+from rest_framework.views import APIView  # <--- Needed for the UI fix
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework import serializers    # <--- Needed for the input form
 from PIL import Image
 from .models import FoodItem
 from .serializers import FoodItemSerializer
@@ -28,6 +30,10 @@ def encode_image(image_file):
     This helper converts the uploaded file into that format.
     """
     return base64.b64encode(image_file.read()).decode('utf-8')
+
+# --- 1. SERIALIZER FOR IMAGE UPLOAD (Fixes the UI button) ---
+class FoodImageSerializer(serializers.Serializer):
+    image = serializers.ImageField()
 
 # --- VIEWS ---
 
@@ -104,79 +110,83 @@ def ask_nutritionist(request):
 
     return Response({"error": "All AI services are currently down."}, status=503)
 
-@api_view(['POST'])
-def scan_food_image(request):
-    """
-    IMAGE Endpoint: Upload a photo -> Get Calorie Count
-    """
-    if 'image' not in request.FILES:
-        return Response({"error": "No image provided"}, status=400)
-    
-    image_file = request.FILES['image']
-    
-    # Define the Prompt
-    prompt = """
-    Analyze this food image. Identify the food items.
-    Estimate the calories and macros (Protein, Carbs, Fats).
-    Return the answer in this JSON format:
-    {
-        "food_name": "...",
-        "estimated_calories": "...",
-        "protein": "...",
-        "carbs": "...",
-        "fat": "..."
-    }
-    """
+# --- 2. CLASS-BASED VIEW FOR IMAGE SCANNING (Fixes the UI button) ---
+class ScanFoodView(APIView):
+    parser_classes = (MultiPartParser, FormParser)
+    serializer_class = FoodImageSerializer
 
-    # ---------------------------------------------------------
-    # ATTEMPT 1: GOOGLE GEMINI VISION (Primary)
-    # ---------------------------------------------------------
-    try:
-        print("Scanning with Gemini Vision...")
-        pil_image = Image.open(image_file)
+    def post(self, request, *args, **kwargs):
+        """
+        IMAGE Endpoint: Upload a photo -> Get Calorie Count
+        """
+        if 'image' not in request.FILES:
+            return Response({"error": "No image provided"}, status=400)
         
-        # Use Gemini 2.0 Flash (Supports Images)
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
-        response = model.generate_content([prompt, pil_image])
+        image_file = request.FILES['image']
         
-        return Response({"analysis": response.text, "source": "Gemini"})
-
-    except Exception as e_gemini:
-        print(f"Gemini Vision Failed: {e_gemini}")
+        # Define the Prompt
+        prompt = """
+        Analyze this food image. Identify the food items.
+        Estimate the calories and macros (Protein, Carbs, Fats).
+        Return the answer in this JSON format:
+        {
+            "food_name": "...",
+            "estimated_calories": "...",
+            "protein": "...",
+            "carbs": "...",
+            "fat": "..."
+        }
+        """
 
         # ---------------------------------------------------------
-        # ATTEMPT 2: MISTRAL PIXTRAL (Fallback)
+        # ATTEMPT 1: GOOGLE GEMINI VISION (Primary)
         # ---------------------------------------------------------
-        if MISTRAL_KEY:
-            try:
-                print("Switching to Mistral Pixtral...")
-                
-                # IMPORTANT: Reset file pointer to the beginning so Mistral can read it
-                image_file.seek(0)
-                base64_image = encode_image(image_file)
+        try:
+            print("Scanning with Gemini Vision...")
+            pil_image = Image.open(image_file)
+            
+            # Use Gemini 2.0 Flash (Supports Images)
+            model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            response = model.generate_content([prompt, pil_image])
+            
+            return Response({"analysis": response.text, "source": "Gemini"})
 
-                client = Mistral(api_key=MISTRAL_KEY)
+        except Exception as e_gemini:
+            print(f"Gemini Vision Failed: {e_gemini}")
 
-                chat_response = client.chat.complete(
-                    model="pixtral-12b-2409",  # Mistral's Vision Model
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_image}"}
-                            ]
-                        }
-                    ]
-                )
-                
-                return Response({
-                    "analysis": chat_response.choices[0].message.content,
-                    "source": "Mistral Pixtral"
-                })
+            # ---------------------------------------------------------
+            # ATTEMPT 2: MISTRAL PIXTRAL (Fallback)
+            # ---------------------------------------------------------
+            if MISTRAL_KEY:
+                try:
+                    print("Switching to Mistral Pixtral...")
+                    
+                    # IMPORTANT: Reset file pointer so Mistral can read it from start
+                    image_file.seek(0)
+                    base64_image = encode_image(image_file)
 
-            except Exception as e_mistral:
-                print(f"Mistral Pixtral Failed: {e_mistral}")
-                return Response({"error": f"Both AIs failed. Mistral Error: {str(e_mistral)}"}, status=500)
+                    client = Mistral(api_key=MISTRAL_KEY)
 
-    return Response({"error": "Analysis failed"}, status=500)
+                    chat_response = client.chat.complete(
+                        model="pixtral-12b-2409",  # Mistral's Vision Model
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_image}"}
+                                ]
+                            }
+                        ]
+                    )
+                    
+                    return Response({
+                        "analysis": chat_response.choices[0].message.content,
+                        "source": "Mistral Pixtral"
+                    })
+
+                except Exception as e_mistral:
+                    print(f"Mistral Pixtral Failed: {e_mistral}")
+                    return Response({"error": f"Both AIs failed. Mistral Error: {str(e_mistral)}"}, status=500)
+
+        return Response({"error": "Analysis failed"}, status=500)
