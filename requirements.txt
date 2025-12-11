@@ -133,7 +133,6 @@ python-slugify==8.0.4
 python-socketio==5.12.1
 pyttsx3==2.98
 pytz==2025.2
-pywin32==308
 PyYAML==6.0.3
 PyYAML-ft==8.0.0
 referencing==0.37.0
