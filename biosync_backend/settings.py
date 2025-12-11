@@ -1,19 +1,26 @@
-import os
+"""
+Django settings for biosync_backend project.
+"""
+
 from pathlib import Path
+import os
 import dj_database_url
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-change-me-for-production')
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-change-me-to-a-real-secret-key')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-# We set this to True only if we are NOT on Render (for local testing)
+# This sets Debug to False if running on Render, True if on your laptop
 DEBUG = 'RENDER' not in os.environ
 
-# Allow all hosts so Render URL works
+# ALLOWED_HOSTS is required for the cloud. '*' allows your Render URL to work.
 ALLOWED_HOSTS = ['*']
+
+
+# Application definition
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -22,16 +29,16 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    # Add your own apps here later
+    # Add your apps here if you create them later
     'rest_framework',
-    'corsheaders',
+    'corsheaders', 
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware',  # <--- CRITICAL FOR RENDER
+    'whitenoise.middleware.WhiteNoiseMiddleware', # <--- CRITICAL: Serves static files on Render
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'corsheaders.middleware.CorsMiddleware',       # <--- For Flutter connection
+    'corsheaders.middleware.CorsMiddleware',      # <--- CRITICAL: Allows Flutter to connect
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -59,14 +66,21 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'biosync_backend.wsgi.application'
 
+
 # Database
-# This allows it to work on your laptop (sqlite) AND Render (Neon) automatically
+# https://docs.djangoproject.com/en/5.1/ref/settings/#databases
+
 DATABASES = {
     'default': dj_database_url.config(
+        # Use SQLite locally, but use Render's DATABASE_URL automatically in production
         default='sqlite:///db.sqlite3',
         conn_max_age=600
     )
 }
+
+
+# Password validation
+# https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -83,18 +97,31 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+
+# Internationalization
+# https://docs.djangoproject.com/en/5.1/topics/i18n/
+
 LANGUAGE_CODE = 'en-us'
+
 TIME_ZONE = 'UTC'
+
 USE_I18N = True
+
 USE_TZ = True
 
+
 # Static files (CSS, JavaScript, Images)
+# https://docs.djangoproject.com/en/5.1/howto/static-files/
+
 STATIC_URL = 'static/'
 
-# THIS IS THE LINE THAT WAS MISSING causing your error:
+# This is the specific line that caused your error. It tells Django where to put files.
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
-# Enable WhiteNoise to serve static files on Render
+# This enables WhiteNoise to actually serve those files
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
+# Default primary key field type
+# https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
