@@ -121,7 +121,6 @@ pygtrie==2.5.0
 PyJWT==2.10.1
 pyparsing==3.2.1
 pypi==2.1
-pypiwin32==223
 python-daemon==3.1.2
 python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
