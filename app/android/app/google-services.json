@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "216510333014",
+    "project_id": "nutrichoice-27549",
+    "storage_bucket": "nutrichoice-27549.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:216510333014:android:313980c17c981364d7fbf7",
+        "android_client_info": {
+          "package_name": "com.example.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCuTbVpfmSuDs9WOCj0UiHnE0JxiaX8-lA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
