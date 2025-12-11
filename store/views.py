@@ -30,7 +30,7 @@ def ask_nutritionist(request):
 
     try:
         # Create the model
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
         # Ask the question
         response = model.generate_content(
