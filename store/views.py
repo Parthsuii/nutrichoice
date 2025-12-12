@@ -174,7 +174,7 @@ class ScanFoodView(APIView):
         
         return Response({"error": "Analysis failed after all attempts."}, status=500)
 
-# --- 3. NEW: PHYSIQUE ARCHITECT (ONBOARDING) ---
+# --- 3. PHYSIQUE ARCHITECT (SELF-HEALING & FIXED) ---
 @api_view(['POST', 'GET'])
 def user_profile_view(request):
     """
@@ -182,58 +182,64 @@ def user_profile_view(request):
     GET: Retrieve profile data.
     POST: Save profile data and auto-calculate 'daily_calorie_target'.
     """
-    # 1. Get the current user (For testing, we take the first user in DB)
-    user = User.objects.first()
-    if not user:
-        return Response({"error": "No users exist. Create a superuser first!"}, status=400)
-    
-    # Get or create the profile for this user
-    profile, created = UserProfile.objects.get_or_create(user=user)
+    # 1. SELF-HEALING: Create a user if none exists (Prevents crash on new DB)
+    if not User.objects.exists():
+        try:
+            User.objects.create_superuser('admin', 'admin@example.com', 'admin123')
+        except:
+            pass # Keep going if this fails
 
-    # 2. IF GET: Just return the data
+    # 2. Get the current user
+    user = User.objects.first()
+    
+    # 3. FIX: Add 'defaults' so database doesn't crash on empty weight/height
+    profile, created = UserProfile.objects.get_or_create(
+        user=user,
+        defaults={
+            'current_weight': 70.0,
+            'height': 170,
+            'goal': 'MAINTAIN',
+            'activity_level': 'SEDENTARY'
+        }
+    )
+
+    # 4. IF GET: Just return the data
     if request.method == 'GET':
         serializer = UserProfileSerializer(profile)
         return Response(serializer.data)
 
-    # 3. IF POST: Update data and Recalculate Calories
+    # 5. IF POST: Update data and Recalculate Calories
     if request.method == 'POST':
         serializer = UserProfileSerializer(profile, data=request.data, partial=True)
         if serializer.is_valid():
-            # Save the raw inputs (weight, height, goal, etc.)
             saved_profile = serializer.save()
             
             # --- DYNAMIC CALORIE MANAGER LOGIC ---
-            # 1. Calculate BMR (Mifflin-St Jeor Formula)
-            # Assuming Male, Age 25 for MVP simplicity
             weight = saved_profile.current_weight
             height = saved_profile.height
             age = 25 
             
             bmr = (10 * weight) + (6.25 * height) - (5 * age) + 5
             
-            # 2. Apply Activity Multiplier
             multipliers = {
                 'SEDENTARY': 1.2,
                 'ACTIVE': 1.55,
                 'ATHLETE': 1.9
             }
-            # Default to 1.2 if not found
             tdee = bmr * multipliers.get(saved_profile.activity_level, 1.2)
             
-            # 3. Apply Goal Adjustment
             if saved_profile.goal == 'SHRED':
-                final_target = tdee - 500  # Calorie Deficit
+                final_target = tdee - 500
             elif saved_profile.goal == 'BULK':
-                final_target = tdee + 500  # Calorie Surplus
+                final_target = tdee + 500
             else:
-                final_target = tdee        # Maintain
+                final_target = tdee
                 
-            # 4. Save the calculated target
             saved_profile.daily_calorie_target = int(final_target)
             saved_profile.save()
             
             return Response({
-                "message": "Profile updated and calories calculated!",
+                "message": "Profile updated!",
                 "calculated_calories": saved_profile.daily_calorie_target,
                 "goal": saved_profile.goal
             })
