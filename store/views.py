@@ -1,6 +1,6 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-# 1. UPDATED IMPORT: Added RetrieveUpdateDestroyAPIView
+# 1. UPDATED IMPORT: Added RetrieveUpdateDestroyAPIView for Deleting
 from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -34,11 +34,12 @@ def encode_image(image_file):
 
 # --- VIEWS ---
 
+# 1. LIST & CREATE FOODS
 class FoodItemList(ListCreateAPIView):
     queryset = FoodItem.objects.all()
     serializer_class = FoodItemSerializer
 
-# 2. NEW VIEW: Handles Deleting a Specific Food Item
+# 2. NEW: DELETE & UPDATE FOODS (For the Delete Button)
 class FoodItemDetail(RetrieveUpdateDestroyAPIView):
     queryset = FoodItem.objects.all()
     serializer_class = FoodItemSerializer
@@ -89,7 +90,7 @@ def ask_nutritionist(request):
 
     return Response({"error": "All AI services are currently down."}, status=503)
 
-# --- 2. CLASS-BASED VIEW FOR IMAGE SCANNING (WITH AUTO-SAVE) ---
+# --- 3. CLASS-BASED VIEW FOR IMAGE SCANNING (WITH AUTO-SAVE) ---
 class ScanFoodView(APIView):
     parser_classes = (MultiPartParser, FormParser)
     serializer_class = FoodImageSerializer
@@ -180,7 +181,7 @@ class ScanFoodView(APIView):
         
         return Response({"error": "Analysis failed after all attempts."}, status=500)
 
-# --- 3. PHYSIQUE ARCHITECT (SELF-HEALING & FIXED) ---
+# --- 4. PHYSIQUE ARCHITECT (SELF-HEALING) ---
 @api_view(['POST', 'GET'])
 def user_profile_view(request):
     """
@@ -188,17 +189,14 @@ def user_profile_view(request):
     GET: Retrieve profile data.
     POST: Save profile data and auto-calculate 'daily_calorie_target'.
     """
-    # 1. SELF-HEALING: Create a user if none exists (Prevents crash on new DB)
     if not User.objects.exists():
         try:
             User.objects.create_superuser('admin', 'admin@example.com', 'admin123')
         except:
-            pass # Keep going if this fails
+            pass 
 
-    # 2. Get the current user
     user = User.objects.first()
     
-    # 3. FIX: Add 'defaults' so database doesn't crash on empty weight/height
     profile, created = UserProfile.objects.get_or_create(
         user=user,
         defaults={
@@ -209,18 +207,15 @@ def user_profile_view(request):
         }
     )
 
-    # 4. IF GET: Just return the data
     if request.method == 'GET':
         serializer = UserProfileSerializer(profile)
         return Response(serializer.data)
 
-    # 5. IF POST: Update data and Recalculate Calories
     if request.method == 'POST':
         serializer = UserProfileSerializer(profile, data=request.data, partial=True)
         if serializer.is_valid():
             saved_profile = serializer.save()
             
-            # --- DYNAMIC CALORIE MANAGER LOGIC ---
             weight = saved_profile.current_weight
             height = saved_profile.height
             age = 25 
@@ -251,3 +246,77 @@ def user_profile_view(request):
             })
             
         return Response(serializer.errors, status=400)
+
+# --- 5. NEW: CONTEXT CHEF MEAL PLANNER ---
+@api_view(['POST'])
+def generate_meal_plan(request):
+    """
+    Generates a full day's meal plan based on Goal, Calories, and Context.
+    """
+    user_goal = request.data.get('user_goal', 'Maintain')
+    calories = request.data.get('daily_calories', 2000)
+    context = request.data.get('activity_context', 'Standard Day')
+    ingredients = request.data.get('available_ingredients', [])
+    
+    prompt = f"""
+    You are an elite sports nutritionist. Create a 1-day meal plan.
+    GOAL: {user_goal}
+    TARGET CALORIES: {calories}
+    CONTEXT: {context} (e.g. if 'Sore', add anti-inflammatory foods. If 'Exam', add brain foods).
+    PANTRY: Use these if possible: {', '.join(ingredients)}
+    
+    Output strictly valid JSON with this structure:
+    {{
+        "analysis": "Brief explanation of why this plan fits the context.",
+        "meals": [
+            {{
+                "type": "Breakfast",
+                "name": "Dish Name",
+                "calories": 500,
+                "nutrients": {{"protein": "30g", "carbs": "40g", "fat": "15g"}},
+                "ingredients": ["Egg", "Bread"],
+                "recipe": ["Step 1", "Step 2"]
+            }}
+        ]
+    }}
+    """
+    
+    try:
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        response = model.generate_content(prompt)
+        clean_json = response.text.strip().replace("```json", "").replace("```", "").strip()
+        data = json.loads(clean_json)
+        return Response(data)
+    except Exception as e:
+        print(f"AI Generation Failed: {e}")
+        return Response({"error": "Failed to generate plan. AI might be busy."}, status=500)
+
+# --- 6. NEW: MEAL SWAPPER ---
+@api_view(['POST'])
+def swap_meal(request):
+    """
+    Swaps a SINGLE meal for a new option while keeping the context.
+    """
+    context = request.data.get('activity_context', 'Standard Day')
+    user_goal = request.data.get('user_goal', 'Maintain')
+    
+    prompt = f"""
+    Suggest ONE alternative meal for a user with Goal: {user_goal} and Context: {context}.
+    Return strictly valid JSON for a single meal object:
+    {{
+        "name": "New Dish Name",
+        "calories": 500,
+        "nutrients": {{"protein": "30g", "carbs": "40g", "fat": "15g"}},
+        "ingredients": ["List", "of", "items"],
+        "recipe": ["Step 1", "Step 2"]
+    }}
+    """
+    
+    try:
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        response = model.generate_content(prompt)
+        clean_json = response.text.strip().replace("```json", "").replace("```", "").strip()
+        data = json.loads(clean_json)
+        return Response(data)
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)

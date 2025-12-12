@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'services/api_service.dart'; // <--- IMPORT API SERVICE
 
 class SmartMealPlannerScreen extends StatefulWidget {
   const SmartMealPlannerScreen({super.key});
@@ -167,7 +168,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
       if (response.statusCode == 200) {
         final newMeal = jsonDecode(response.body);
         setState(() {
-          newMeal['type'] = _meals[index]['type']; // Maintain meal type (e.g., Breakfast)
+          newMeal['type'] = _meals[index]['type']; 
           _meals[index] = newMeal;
         });
         
@@ -206,6 +207,16 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
     setState(() => _availableIngredients.remove(item));
   }
 
+  // --- NEW: AI CHAT SHEET ---
+  void _showChatSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => const ChefChatWidget(),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -223,6 +234,16 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
           )
         ],
       ),
+      
+      // NEW: FLOATING CHAT BUTTON
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _showChatSheet,
+        backgroundColor: Colors.tealAccent,
+        foregroundColor: Colors.black,
+        icon: const Icon(Icons.chat_bubble_outline),
+        label: const Text("Ask Chef"),
+      ),
+
       body: Column(
         children: [
           // CONTEXT & PANTRY SECTION
@@ -418,6 +439,137 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
         Text(value, style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 16)),
         Text(label, style: const TextStyle(color: Colors.grey, fontSize: 9)),
       ],
+    );
+  }
+}
+
+// --- NEW WIDGET: CHEF CHAT ---
+class ChefChatWidget extends StatefulWidget {
+  const ChefChatWidget({super.key});
+
+  @override
+  State<ChefChatWidget> createState() => _ChefChatWidgetState();
+}
+
+class _ChefChatWidgetState extends State<ChefChatWidget> {
+  final TextEditingController _chatController = TextEditingController();
+  final List<Map<String, String>> _messages = [
+    {"role": "system", "content": "Hello! I am your AI Chef. Ask me about nutrition, recipes, or your meal plan!"}
+  ];
+  bool _isTyping = false;
+
+  Future<void> _sendMessage() async {
+    final text = _chatController.text.trim();
+    if (text.isEmpty) return;
+
+    setState(() {
+      _messages.add({"role": "user", "content": text});
+      _isTyping = true;
+      _chatController.clear();
+    });
+
+    try {
+      // Call the API
+      final response = await ApiService.askAI(text);
+      
+      if(mounted) {
+        setState(() {
+          _messages.add({"role": "system", "content": response});
+          _isTyping = false;
+        });
+      }
+    } catch (e) {
+      if(mounted) {
+        setState(() {
+          _messages.add({"role": "system", "content": "Error: Could not connect to Chef."});
+          _isTyping = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: MediaQuery.of(context).size.height * 0.7, // 70% height
+      decoration: BoxDecoration(
+        color: Colors.grey.shade900,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      child: Column(
+        children: [
+          // Handle Bar
+          Container(
+            width: 40, height: 4, 
+            margin: const EdgeInsets.symmetric(vertical: 10),
+            decoration: BoxDecoration(color: Colors.grey, borderRadius: BorderRadius.circular(2)),
+          ),
+          const Text("Chat with Chef", style: TextStyle(color: Colors.tealAccent, fontSize: 18, fontWeight: FontWeight.bold)),
+          const Divider(color: Colors.grey),
+          
+          // Messages List
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.all(16),
+              itemCount: _messages.length,
+              itemBuilder: (context, index) {
+                final msg = _messages[index];
+                final isUser = msg['role'] == 'user';
+                return Align(
+                  alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(vertical: 5),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: isUser ? Colors.teal : Colors.grey.shade800,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(msg['content']!, style: const TextStyle(color: Colors.white)),
+                  ),
+                );
+              },
+            ),
+          ),
+          
+          if (_isTyping)
+            const Padding(
+              padding: EdgeInsets.all(8.0),
+              child: Text("Chef is typing...", style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic)),
+            ),
+
+          // Input Field
+          Padding(
+            padding: EdgeInsets.only(
+              left: 16, right: 16, top: 10, 
+              bottom: MediaQuery.of(context).viewInsets.bottom + 20 // Keyboard avoidance
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _chatController,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      hintText: "Ask about food...",
+                      hintStyle: const TextStyle(color: Colors.grey),
+                      filled: true,
+                      fillColor: Colors.black,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(30), borderSide: BorderSide.none),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                    ),
+                    onSubmitted: (_) => _sendMessage(),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                CircleAvatar(
+                  backgroundColor: Colors.teal,
+                  child: IconButton(icon: const Icon(Icons.send, color: Colors.white), onPressed: _sendMessage),
+                )
+              ],
+            ),
+          )
+        ],
+      ),
     );
   }
 }
