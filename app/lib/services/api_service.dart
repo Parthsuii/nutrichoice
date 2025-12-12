@@ -1,12 +1,12 @@
 import 'dart:convert';
-import 'dart:io'; // <--- Needed for File (Camera images)
+import 'dart:io';
 import 'package:http/http.dart' as http;
 
 class ApiService {
   // Your Backend URL
   static const String baseUrl = "https://nutrichoice-xvpf.onrender.com/api";
 
-  // --- 1. USER PROFILE (Physique Architect) ---
+  // --- 1. USER PROFILE ---
   static Future<Map<String, dynamic>> updateProfile({
     required double weight,
     required int height,
@@ -14,10 +14,8 @@ class ApiService {
     required String activityLevel,
   }) async {
     final url = Uri.parse('$baseUrl/profile/');
-    
     try {
       print("Sending profile data to $url...");
-      
       final response = await http.post(
         url,
         headers: {"Content-Type": "application/json"},
@@ -30,10 +28,8 @@ class ApiService {
       );
 
       if (response.statusCode == 200) {
-        print("✅ Success! Server Response: ${response.body}");
         return jsonDecode(response.body);
       } else {
-        print("❌ Server Error: ${response.body}");
         throw Exception("Failed to update profile: ${response.body}");
       }
     } catch (e) {
@@ -42,8 +38,7 @@ class ApiService {
     }
   }
 
-  // --- 2. GET FOODS (Meal Tracker) ---
-  // Connects to: FoodItemList view
+  // --- 2. GET FOODS ---
   static Future<List<dynamic>> getFoods() async {
     final url = Uri.parse('$baseUrl/foods/');
     try {
@@ -51,7 +46,7 @@ class ApiService {
       final response = await http.get(url);
       
       if (response.statusCode == 200) {
-        return jsonDecode(response.body); // Returns a List of foods
+        return jsonDecode(response.body);
       } else {
         throw Exception("Failed to load foods: ${response.statusCode}");
       }
@@ -61,8 +56,7 @@ class ApiService {
     }
   }
 
-  // --- 3. ASK AI (Smart Chef) ---
-  // Connects to: ask_nutritionist view
+  // --- 3. ASK AI (Chat) ---
   static Future<String> askAI(String question) async {
     final url = Uri.parse('$baseUrl/ask-ai/');
     try {
@@ -83,14 +77,11 @@ class ApiService {
     }
   }
 
-  // --- 4. SCAN FOOD (Camera) ---
-  // Connects to: ScanFoodView
+  // --- 4. SCAN FOOD ---
   static Future<Map<String, dynamic>> scanFood(File imageFile) async {
     final url = Uri.parse('$baseUrl/scan-food/');
     try {
       print("Uploading image to $url...");
-      
-      // We use MultipartRequest because we are sending a FILE, not just text
       var request = http.MultipartRequest('POST', url);
       request.files.add(await http.MultipartFile.fromPath('image', imageFile.path));
 
@@ -98,7 +89,6 @@ class ApiService {
       var response = await http.Response.fromStream(streamedResponse);
 
       if (response.statusCode == 200) {
-        print("✅ Scan Complete: ${response.body}");
         return jsonDecode(response.body);
       } else {
         throw Exception("Scan failed: ${response.body}");
@@ -109,12 +99,8 @@ class ApiService {
     }
   }
 
-  // --- 5. DELETE FOOD (New Feature) ---
-  // Connects to: DELETE /api/foods/{id}/
+  // --- 5. DELETE FOOD ---
   static Future<void> deleteFood(int id) async {
-    // Note: This endpoint must exist on your backend.
-    // If you haven't added a specific DELETE view yet, this will act as a placeholder
-    // that removes it from the UI, but it might fail on the server side until we update views.py.
     final url = Uri.parse('$baseUrl/foods/$id/'); 
     try {
       print("Deleting food ID $id...");
@@ -127,6 +113,70 @@ class ApiService {
       }
     } catch (e) {
       print("❌ Delete Error: $e");
+    }
+  }
+
+  // --- 6. GENERATE MEAL PLAN (NEW) ---
+  // Connects to: /api/generate-meal-plan
+  static Future<Map<String, dynamic>> generateMealPlan({
+    required String goal,
+    required int calories,
+    required String context,
+    required List<String> ingredients,
+  }) async {
+    final url = Uri.parse('$baseUrl/generate-meal-plan');
+    try {
+      print("Generating plan for context: $context...");
+      final response = await http.post(
+        url,
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "user_goal": goal,
+          "daily_calories": calories,
+          "activity_context": context,
+          "available_ingredients": ingredients,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      } else {
+        throw Exception("Generation failed: ${response.body}");
+      }
+    } catch (e) {
+      print("❌ Generation Error: $e");
+      throw Exception("Error generating plan: $e");
+    }
+  }
+
+  // --- 7. SWAP MEAL (NEW) ---
+  // Connects to: /api/swap-meal
+  static Future<Map<String, dynamic>> swapMeal({
+    required String goal,
+    required int calories,
+    required String context,
+  }) async {
+    final url = Uri.parse('$baseUrl/swap-meal');
+    try {
+      print("Swapping meal...");
+      final response = await http.post(
+        url,
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "user_goal": goal,
+          "daily_calories": calories,
+          "activity_context": context,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      } else {
+        throw Exception("Swap failed: ${response.body}");
+      }
+    } catch (e) {
+      print("❌ Swap Error: $e");
+      throw Exception("Error swapping meal: $e");
     }
   }
 }

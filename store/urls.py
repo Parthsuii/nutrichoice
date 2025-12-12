@@ -7,4 +7,6 @@ urlpatterns = [
     path('ask-ai/', views.ask_nutritionist),
     path('scan-food/', views.ScanFoodView.as_view()),
     path('profile/', views.user_profile_view),
+    path('generate-meal-plan', views.generate_meal_plan),
+    path('swap-meal', views.swap_meal),
 ]

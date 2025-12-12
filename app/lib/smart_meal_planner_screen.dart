@@ -1,9 +1,8 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'services/api_service.dart'; // <--- IMPORT API SERVICE
+import 'services/api_service.dart'; // <--- USES YOUR CENTRAL SERVICE
 
 class SmartMealPlannerScreen extends StatefulWidget {
   const SmartMealPlannerScreen({super.key});
@@ -97,7 +96,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
     _generateFullPlan();
   }
 
-  // --- 2. GENERATE NEW PLAN ---
+  // --- 2. GENERATE NEW PLAN (Updated to use ApiService) ---
   Future<void> _generateFullPlan() async {
     setState(() => _isLoading = true);
     
@@ -110,35 +109,28 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
         finalContext += ". USER SORE IN: ${soreMuscles.join(', ')}. ADD ANTI-INFLAMMATORY FOODS.";
       }
 
-      final response = await http.post(
-        Uri.parse('https://nutrichoice-xvpf.onrender.com/generate-meal-plan'),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({
-          "user_goal": _userGoal,
-          "daily_calories": _dailyCalories,
-          "dietary_preference": "Indian",
-          "available_ingredients": _availableIngredients,
-          "activity_context": finalContext,
-        }),
+      // CALL API SERVICE
+      final data = await ApiService.generateMealPlan(
+        goal: _userGoal,
+        calories: _dailyCalories,
+        context: finalContext,
+        ingredients: _availableIngredients,
       );
 
       if (!mounted) return;
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        if (data['meals'] != null) {
-          setState(() {
-            _meals = data['meals'];
-            _chefAnalysis = data['analysis'] ?? "Here is your plan.";
-            _isLoading = false;
-          });
+      if (data['meals'] != null) {
+        setState(() {
+          _meals = data['meals'];
+          _chefAnalysis = data['analysis'] ?? "Here is your plan.";
+          _isLoading = false;
+        });
 
-          String todayDate = DateTime.now().toIso8601String().split('T')[0];
-          await prefs.setString('saved_plan_date', todayDate);
-          await prefs.setString('saved_plan_json', jsonEncode(_meals));
-          await prefs.setString('saved_plan_context', _selectedContext);
-          await prefs.setString('saved_plan_analysis', _chefAnalysis);
-        }
+        String todayDate = DateTime.now().toIso8601String().split('T')[0];
+        await prefs.setString('saved_plan_date', todayDate);
+        await prefs.setString('saved_plan_json', jsonEncode(_meals));
+        await prefs.setString('saved_plan_context', _selectedContext);
+        await prefs.setString('saved_plan_analysis', _chefAnalysis);
       }
     } catch (e) {
       if (!mounted) return;
@@ -147,36 +139,27 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
     }
   }
 
-  // --- SWAP MEAL LOGIC ---
+  // --- 3. SWAP MEAL LOGIC (Updated to use ApiService) ---
   Future<void> _swapSingleMeal(int index) async {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Swapping meal...")));
     try {
-      final response = await http.post(
-        Uri.parse('https://nutrichoice-xvpf.onrender.com/swap-meal'),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({
-          "user_goal": _userGoal,
-          "daily_calories": _dailyCalories, 
-          "dietary_preference": "Indian",
-          "available_ingredients": _availableIngredients,
-          "activity_context": _selectedContext,
-        }),
+      // CALL API SERVICE
+      final newMeal = await ApiService.swapMeal(
+        goal: _userGoal,
+        calories: _dailyCalories,
+        context: _selectedContext,
       );
 
       if (!mounted) return;
 
-      if (response.statusCode == 200) {
-        final newMeal = jsonDecode(response.body);
-        setState(() {
-          newMeal['type'] = _meals[index]['type']; 
-          _meals[index] = newMeal;
-        });
-        
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('saved_plan_json', jsonEncode(_meals));
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Server rejected request (422)")));
-      }
+      setState(() {
+        newMeal['type'] = _meals[index]['type']; // Keep Breakfast/Lunch tag
+        _meals[index] = newMeal;
+      });
+      
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('saved_plan_json', jsonEncode(_meals));
+
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Swap failed: $e")));
@@ -192,7 +175,6 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
     }
   }
 
-  // --- UI HELPERS ---
   void _addIngredient() {
     String text = _ingredientController.text.trim();
     if (text.isNotEmpty && !_availableIngredients.contains(text)) {
@@ -207,7 +189,6 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
     setState(() => _availableIngredients.remove(item));
   }
 
-  // --- NEW: AI CHAT SHEET ---
   void _showChatSheet() {
     showModalBottomSheet(
       context: context,
@@ -235,7 +216,6 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
         ],
       ),
       
-      // NEW: FLOATING CHAT BUTTON
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _showChatSheet,
         backgroundColor: Colors.tealAccent,
@@ -246,7 +226,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
 
       body: Column(
         children: [
-          // CONTEXT & PANTRY SECTION
+          // CONTEXT SECTION
           Container(
             padding: const EdgeInsets.all(16),
             color: Colors.grey.shade900,
@@ -326,7 +306,6 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              // 1. HEADER
                               Row(
                                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
@@ -335,15 +314,11 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
                                 ],
                               ),
                               const SizedBox(height: 8),
-                              
-                              // 2. NAME
                               Text(
                                 meal['name'] ?? "Unknown Dish", 
                                 style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)
                               ),
                               const SizedBox(height: 15),
-
-                              // 3. NUTRIENTS BADGE
                               Container(
                                 padding: const EdgeInsets.symmetric(vertical: 10),
                                 decoration: BoxDecoration(
@@ -361,8 +336,6 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
                                 ),
                               ),
                               const SizedBox(height: 15),
-
-                              // 4. INGREDIENTS
                               Wrap(
                                 spacing: 8,
                                 children: ingredients.map<Widget>((ing) {
@@ -374,10 +347,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
                                   );
                                 }).toList(),
                               ),
-                              
                               const SizedBox(height: 10),
-
-                              // 5. RECIPE STEPS
                               ExpansionTile(
                                 tilePadding: EdgeInsets.zero,
                                 title: const Text("👩‍🍳 View Recipe", style: TextStyle(color: Colors.white70, fontSize: 14)),
@@ -385,10 +355,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
                                   Container(
                                     width: double.infinity,
                                     padding: const EdgeInsets.all(12),
-                                    decoration: BoxDecoration(
-                                      color: Colors.black26,
-                                      borderRadius: BorderRadius.circular(8)
-                                    ),
+                                    decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(8)),
                                     child: Column(
                                       crossAxisAlignment: CrossAxisAlignment.start,
                                       children: recipeSteps.asMap().entries.map((entry) {
@@ -407,10 +374,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
                                   )
                                 ],
                               ),
-
                               const SizedBox(height: 10),
-                              
-                              // 6. ACTIONS
                               Row(
                                 children: [
                                   Expanded(
@@ -443,7 +407,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
   }
 }
 
-// --- NEW WIDGET: CHEF CHAT ---
+// --- CHEF CHAT WIDGET ---
 class ChefChatWidget extends StatefulWidget {
   const ChefChatWidget({super.key});
 
@@ -469,9 +433,7 @@ class _ChefChatWidgetState extends State<ChefChatWidget> {
     });
 
     try {
-      // Call the API
       final response = await ApiService.askAI(text);
-      
       if(mounted) {
         setState(() {
           _messages.add({"role": "system", "content": response});
@@ -491,23 +453,16 @@ class _ChefChatWidgetState extends State<ChefChatWidget> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: MediaQuery.of(context).size.height * 0.7, // 70% height
+      height: MediaQuery.of(context).size.height * 0.7,
       decoration: BoxDecoration(
         color: Colors.grey.shade900,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
       ),
       child: Column(
         children: [
-          // Handle Bar
-          Container(
-            width: 40, height: 4, 
-            margin: const EdgeInsets.symmetric(vertical: 10),
-            decoration: BoxDecoration(color: Colors.grey, borderRadius: BorderRadius.circular(2)),
-          ),
+          Container(width: 40, height: 4, margin: const EdgeInsets.symmetric(vertical: 10), decoration: BoxDecoration(color: Colors.grey, borderRadius: BorderRadius.circular(2))),
           const Text("Chat with Chef", style: TextStyle(color: Colors.tealAccent, fontSize: 18, fontWeight: FontWeight.bold)),
           const Divider(color: Colors.grey),
-          
-          // Messages List
           Expanded(
             child: ListView.builder(
               padding: const EdgeInsets.all(16),
@@ -530,19 +485,13 @@ class _ChefChatWidgetState extends State<ChefChatWidget> {
               },
             ),
           ),
-          
           if (_isTyping)
             const Padding(
               padding: EdgeInsets.all(8.0),
               child: Text("Chef is typing...", style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic)),
             ),
-
-          // Input Field
           Padding(
-            padding: EdgeInsets.only(
-              left: 16, right: 16, top: 10, 
-              bottom: MediaQuery.of(context).viewInsets.bottom + 20 // Keyboard avoidance
-            ),
+            padding: EdgeInsets.only(left: 16, right: 16, top: 10, bottom: MediaQuery.of(context).viewInsets.bottom + 20),
             child: Row(
               children: [
                 Expanded(
@@ -561,10 +510,7 @@ class _ChefChatWidgetState extends State<ChefChatWidget> {
                   ),
                 ),
                 const SizedBox(width: 10),
-                CircleAvatar(
-                  backgroundColor: Colors.teal,
-                  child: IconButton(icon: const Icon(Icons.send, color: Colors.white), onPressed: _sendMessage),
-                )
+                CircleAvatar(backgroundColor: Colors.teal, child: IconButton(icon: const Icon(Icons.send, color: Colors.white), onPressed: _sendMessage))
               ],
             ),
           )
