@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dashboard.dart';
+import 'services/api_service.dart'; // <--- IMPORT YOUR API SERVICE
 
 class OnboardingScreen extends StatefulWidget {
   const OnboardingScreen({super.key});
@@ -28,86 +29,96 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     "Maintain"          // Maintenance
   ];
 
+  // --- THE NEW "LOUD" CONNECTION FUNCTION ---
   Future<void> _calculateAndComplete() async {
+    // 1. Validation
     if (_nameController.text.isEmpty ||
         _ageController.text.isEmpty ||
         _heightController.text.isEmpty ||
         _weightController.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Please fill in all fields to calibrate.")),
+        const SnackBar(content: Text("Please fill in all fields.")),
       );
       return;
     }
 
-    // 1. PARSE INPUTS
-    int age = int.parse(_ageController.text);
+    // 2. Parse Inputs
     double heightCm = double.parse(_heightController.text);
     double weightKg = double.parse(_weightController.text);
-
-    // 2. CALCULATE BMR (Mifflin-St Jeor Equation)
-    // Male: (10 x W) + (6.25 x H) - (5 x A) + 5
-    // Female: (10 x W) + (6.25 x H) - (5 x A) - 161
-    double bmr = (10 * weightKg) + (6.25 * heightCm) - (5 * age);
     
-    if (_selectedGender == "Male") {
-      bmr += 5;
-    } else {
-      bmr -= 161;
-    }
-
-    // 3. CALCULATE TDEE (Baseline Activity)
-    // We assume "Sedentary" (1.2) as a baseline because the Dashboard 
-    // tracks *active* steps separately and adds them on top.
-    double tdee = bmr * 1.2;
-
-    // 4. ADJUST FOR GOAL
-    int targetCalories = tdee.round();
-
-    if (_selectedGoal.contains("Cut") || _selectedGoal.contains("Lean")) {
-      targetCalories -= 500; // Aggressive deficit
-    } else if (_selectedGoal.contains("Bulk")) {
-      targetCalories += 300; // Lean bulk surplus
-    } else if (_selectedGoal.contains("Recomposition")) {
-      targetCalories -= 200; // Slight deficit to burn fat while building
-    }
-    // "Maintain" keeps TDEE as is.
-
-    // Safety Clamps (Don't starve/overfeed dangerously)
-    if (targetCalories < 1200) targetCalories = 1200;
-    if (targetCalories > 4000) targetCalories = 4000;
-
-    // 5. SAVE DATA
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('user_name', _nameController.text);
-    await prefs.setString('user_goal', _selectedGoal);
-    await prefs.setInt('daily_calorie_target', targetCalories);
-    
-    // Save raw stats for potential future use (BMI etc)
-    await prefs.setDouble('user_weight', weightKg);
-    await prefs.setDouble('user_height', heightCm);
-    
-    // Mark as done
-    await prefs.setBool('is_onboarded', true);
-
-    if (!mounted) return;
-    
-    // Show the result briefly before navigating
+    // 3. SHOW LOADING STATUS
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text("Baseline Calculated: $targetCalories kcal/day"),
-        backgroundColor: Colors.teal,
-        duration: const Duration(seconds: 2),
+      const SnackBar(
+        content: Text("Connecting to Server... (Please Wait)"), 
+        duration: Duration(seconds: 10)
       ),
     );
 
-    // Give user a moment to see the message, then go
-    await Future.delayed(const Duration(seconds: 1));
-    if (!mounted) return;
+    try {
+      // Convert Goal to Backend Keywords
+      String backendGoal = 'MAINTAIN';
+      if (_selectedGoal.contains("Cut") || _selectedGoal.contains("Lean")) {
+        backendGoal = 'SHRED';
+      } else if (_selectedGoal.contains("Bulk")) {
+        backendGoal = 'BULK';
+      }
 
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (context) => const DashboardScreen()),
-    );
+      print("🚀 SENDING REQUEST TO: ${ApiService.baseUrl}/profile/");
+
+      // 4. CALL API (This will throw an error if it fails)
+      final serverData = await ApiService.updateProfile(
+        weight: weightKg,
+        height: heightCm.toInt(),
+        goal: backendGoal,
+        activityLevel: 'SEDENTARY',
+      );
+
+      // 5. SUCCESS!
+      print("✅ DATA SENT! Server replied: $serverData");
+      
+      // Save locally
+      int targetCalories = serverData['calculated_calories'] ?? 2000;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('user_name', _nameController.text);
+      await prefs.setString('user_goal', _selectedGoal);
+      await prefs.setInt('daily_calorie_target', targetCalories);
+      
+      // Save raw stats
+      await prefs.setDouble('user_weight', weightKg);
+      await prefs.setDouble('user_height', heightCm);
+      await prefs.setBool('is_onboarded', true);
+
+      if (!mounted) return;
+      
+      // Go to Dashboard
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (context) => const DashboardScreen()),
+      );
+
+    } catch (e) {
+      // 6. FAILURE - SHOW THE ERROR ON SCREEN
+      print("❌ CRITICAL ERROR: $e");
+      
+      if (!mounted) return;
+      
+      // SHOW A POPUP WITH THE EXACT ERROR
+      showDialog(
+        context: context, 
+        builder: (ctx) => AlertDialog(
+          title: const Text("Connection Failed"),
+          content: SingleChildScrollView(
+            child: Text("Could not save to database.\n\nError details:\n$e"),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx), 
+              child: const Text("OK")
+            )
+          ],
+        )
+      );
+    }
   }
 
   @override

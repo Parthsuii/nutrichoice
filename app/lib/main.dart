@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:hive_flutter/hive_flutter.dart';
-import 'dashboard.dart'; // Make sure this points to your Dashboard file
-
+// Make sure this points to your Dashboard file
+import 'onboarding_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -38,7 +38,7 @@ class BioSyncApp extends StatelessWidget {
         primaryColor: Colors.teal,
         scaffoldBackgroundColor: Colors.black,
       ),
-      home: const DashboardScreen(),
+      home: const OnboardingScreen(),
     );
   }
 }
