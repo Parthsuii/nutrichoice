@@ -2,18 +2,23 @@ import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:hive/hive.dart'; // Explicitly importing Hive
 // Make sure this points to your Dashboard file
+
+// Assuming you have these files:
 import 'onboarding_screen.dart';
+import 'dashboard.dart'; // <--- NEW: Assuming you have a Dashboard screen
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // 1. Start Local Database (Fast & Free)
   await Hive.initFlutter();
+  
+  // NOTE: Only open the 'settings' box now, as it's critical for the ternary check.
+  // Other boxes (meals, roster) will be opened lazily when their screens load.
   await Hive.openBox('settings');
-  await Hive.openBox('meals');
-  await Hive.openBox('roster'); 
-  // (You can open more boxes as needed)
-
+  
   // 2. Start Firebase (Analytics & Crash Tracking)
   try {
     await Firebase.initializeApp();
@@ -31,6 +36,10 @@ class BioSyncApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Check the Hive box for the onboarding status
+    final settingsBox = Hive.box('settings');
+    final bool onboardingComplete = settingsBox.get('onboarding_complete', defaultValue: false);
+
     return MaterialApp(
       title: 'BioSync OS',
       debugShowCheckedModeBanner: false,
@@ -38,7 +47,21 @@ class BioSyncApp extends StatelessWidget {
         primaryColor: Colors.teal,
         scaffoldBackgroundColor: Colors.black,
       ),
-      home: const OnboardingScreen(),
+      
+      // --- TERNARY CONDITION FOR INITIAL SCREEN ---
+      home: onboardingComplete 
+          ? const DashboardScreen() // Go straight to Dashboard if complete
+          : const OnboardingScreen(), // Show Onboarding if first launch
     );
   }
 }
+
+// NOTE: You must now update your OnboardingScreen to save 'onboarding_complete': true
+// For example, in the OnboardingScreen's final step:
+/*
+  void completeOnboarding() {
+    final settingsBox = Hive.box('settings');
+    settingsBox.put('onboarding_complete', true);
+    // Navigate to DashboardScreen
+  }
+*/
