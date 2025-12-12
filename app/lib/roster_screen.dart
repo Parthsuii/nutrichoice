@@ -116,7 +116,7 @@ class _RosterScreenState extends State<RosterScreen> {
     setState(() => _isScanning = true);
     try {
       // 1. Point to your endpoint
-      var uri = Uri.parse('https://nutrichoice-xvpf.onrender.com/analyze-roster');
+      var uri = Uri.parse('https://nutrichoice-xvpf.onrender.com/analyze-roster/');
       
       // 2. Create the Multipart Request
       var request = http.MultipartRequest('POST', uri);
