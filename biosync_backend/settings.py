@@ -14,7 +14,7 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-change-me-to-a-real-s
 
 # SECURITY WARNING: don't run with debug turned on in production!
 # This sets Debug to False if running on Render, True if on your laptop
-DEBUG = 'RENDER' not in os.environ
+DEBUG = True
 
 # ALLOWED_HOSTS is required for the cloud. '*' allows your Render URL to work.
 ALLOWED_HOSTS = ['*']
