@@ -7,11 +7,11 @@ class FoodItemSerializer(serializers.ModelSerializer):
         model = FoodItem
         fields = ['id', 'name', 'calories', 'protein', 'carbs', 'fat']
 
-# 2. Image Upload Serializer (This was missing in your last snippet!)
+# 2. Image Upload Serializer
 class FoodImageSerializer(serializers.Serializer):
     image = serializers.ImageField()
 
-# 3. User Profile Serializer (Moved OUTSIDE the FoodItemSerializer)
+# 3. User Profile Serializer
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserProfile

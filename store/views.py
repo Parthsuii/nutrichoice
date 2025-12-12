@@ -5,15 +5,14 @@ from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework import serializers
 from PIL import Image
-from django.contrib.auth.models import User  # <--- Added User model import
+from django.contrib.auth.models import User
 import os
 import base64
 import json
 
 # --- IMPORTS FROM YOUR APP ---
-# Ensure you have updated models.py and serializers.py first!
 from .models import FoodItem, UserProfile 
-from .serializers import FoodItemSerializer, UserProfileSerializer
+from .serializers import FoodItemSerializer, UserProfileSerializer, FoodImageSerializer
 
 # --- AI LIBRARIES ---
 import google.generativeai as genai
@@ -31,10 +30,6 @@ if GOOGLE_KEY:
 # --- HELPER: Convert Image to Base64 for Mistral ---
 def encode_image(image_file):
     return base64.b64encode(image_file.read()).decode('utf-8')
-
-# --- 1. SERIALIZER FOR IMAGE UPLOAD ---
-class FoodImageSerializer(serializers.Serializer):
-    image = serializers.ImageField()
 
 # --- VIEWS ---
 
