@@ -12,5 +12,5 @@ urlpatterns = [
     path('generate-meal-plan', views.generate_meal_plan),
     path('swap-meal', views.swap_meal),
     path('scan-food/', csrf_exempt(views.ScanFoodView.as_view())),
-    path('analyze-roster', views.AnalyzeRosterView.as_view(), name='analyze-roster'),
+    path('analyze-roster/', views.AnalyzeRosterView.as_view(), name='analyze-roster'),
 ]
