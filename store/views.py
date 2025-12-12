@@ -1,14 +1,15 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework.generics import ListCreateAPIView
-from rest_framework.views import APIView  # <--- Needed for the UI fix
+from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework import serializers    # <--- Needed for the input form
+from rest_framework import serializers
 from PIL import Image
 from .models import FoodItem
 from .serializers import FoodItemSerializer
 import os
 import base64
+import json # <--- ADDED JSON IMPORT
 
 # --- AI LIBRARIES ---
 import google.generativeai as genai
@@ -110,33 +111,38 @@ def ask_nutritionist(request):
 
     return Response({"error": "All AI services are currently down."}, status=503)
 
-# --- 2. CLASS-BASED VIEW FOR IMAGE SCANNING (Fixes the UI button) ---
+# --- 2. CLASS-BASED VIEW FOR IMAGE SCANNING (WITH AUTO-SAVE) ---
 class ScanFoodView(APIView):
     parser_classes = (MultiPartParser, FormParser)
     serializer_class = FoodImageSerializer
 
     def post(self, request, *args, **kwargs):
         """
-        IMAGE Endpoint: Upload a photo -> Get Calorie Count
+        IMAGE Endpoint: Upload a photo -> Get Calorie Count AND Save to Database
         """
         if 'image' not in request.FILES:
             return Response({"error": "No image provided"}, status=400)
         
         image_file = request.FILES['image']
         
-        # Define the Prompt
+        # Define the Prompt - CRITICAL: Force the AI to output PURE JSON
         prompt = """
         Analyze this food image. Identify the food items.
         Estimate the calories and macros (Protein, Carbs, Fats).
-        Return the answer in this JSON format:
+        Your response MUST be ONLY a single, valid JSON object, without any surrounding text, markdown, or commentary.
+        
+        JSON Format Required:
         {
             "food_name": "...",
-            "estimated_calories": "...",
-            "protein": "...",
-            "carbs": "...",
-            "fat": "..."
+            "estimated_calories": integer,
+            "protein": float,
+            "carbs": float,
+            "fat": float
         }
         """
+
+        analysis_data = None
+        source_name = None
 
         # ---------------------------------------------------------
         # ATTEMPT 1: GOOGLE GEMINI VISION (Primary)
@@ -145,11 +151,11 @@ class ScanFoodView(APIView):
             print("Scanning with Gemini Vision...")
             pil_image = Image.open(image_file)
             
-            # Use Gemini 2.0 Flash (Supports Images)
             model = genai.GenerativeModel('gemini-2.0-flash-exp')
             response = model.generate_content([prompt, pil_image])
             
-            return Response({"analysis": response.text, "source": "Gemini"})
+            analysis_data = response.text
+            source_name = "Gemini"
 
         except Exception as e_gemini:
             print(f"Gemini Vision Failed: {e_gemini}")
@@ -161,14 +167,12 @@ class ScanFoodView(APIView):
                 try:
                     print("Switching to Mistral Pixtral...")
                     
-                    # IMPORTANT: Reset file pointer so Mistral can read it from start
                     image_file.seek(0)
                     base64_image = encode_image(image_file)
-
                     client = Mistral(api_key=MISTRAL_KEY)
 
                     chat_response = client.chat.complete(
-                        model="pixtral-12b-2409",  # Mistral's Vision Model
+                        model="pixtral-12b-2409",
                         messages=[
                             {
                                 "role": "user",
@@ -180,13 +184,53 @@ class ScanFoodView(APIView):
                         ]
                     )
                     
-                    return Response({
-                        "analysis": chat_response.choices[0].message.content,
-                        "source": "Mistral Pixtral"
-                    })
+                    analysis_data = chat_response.choices[0].message.content
+                    source_name = "Mistral Pixtral"
 
                 except Exception as e_mistral:
                     print(f"Mistral Pixtral Failed: {e_mistral}")
-                    return Response({"error": f"Both AIs failed. Mistral Error: {str(e_mistral)}"}, status=500)
+                    # If Mistral fails, the analysis_data remains None
 
-        return Response({"error": "Analysis failed"}, status=500)
+        # --- STEP 3: PARSE & SAVE LOGIC (Runs after AI analysis) ---
+
+        if analysis_data:
+            try:
+                # 1. Clean up and parse the JSON
+                # Remove markdown wrappers often added by AIs
+                clean_json_str = analysis_data.strip().replace("```json", "").replace("```", "").strip()
+                parsed_data = json.loads(clean_json_str)
+
+                # 2. Validate and Save the Data to the FoodItem model
+                new_food = FoodItem(
+                    name=parsed_data.get('food_name', 'Unknown Scanned Food'),
+                    # Ensure values are converted to the correct type for the database
+                    calories=int(parsed_data.get('estimated_calories', 0)),
+                    protein=float(parsed_data.get('protein', 0.0)),
+                    # Carbs/Fat fields are assumed to exist in your models.py
+                    carbs=float(parsed_data.get('carbs', 0.0)), 
+                    fat=float(parsed_data.get('fat', 0.0)), 
+                )
+                
+                # 3. Save to PostgreSQL Database!
+                new_food.save()
+
+                return Response({
+                    "message": "Food analyzed and saved successfully!",
+                    "source": source_name,
+                    "saved_data": {
+                        "name": new_food.name,
+                        "calories": new_food.calories,
+                        "protein": new_food.protein
+                    }
+                })
+
+            except json.JSONDecodeError:
+                return Response({
+                    "error": "AI response format error. Could not read JSON.",
+                    "raw_output": analysis_data
+                }, status=500)
+            except Exception as e_save:
+                # Handle errors like attempting to save a string to an integer field
+                return Response({"error": f"Database save error: Check your models.py fields. Error: {str(e_save)}"}, status=500)
+        
+        return Response({"error": "Analysis failed after all attempts."}, status=500)
