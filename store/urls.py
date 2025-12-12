@@ -13,5 +13,6 @@ urlpatterns = [
     path('swap-meal', views.swap_meal),
     path('scan-food/', csrf_exempt(views.ScanFoodView.as_view())),
     path('analyze-roster', views.AnalyzeRosterView.as_view(), name='analyze-roster'),
-    re_path(r'^analyze-roster/?$', csrf_exempt(views.AnalyzeRosterView.as_view())),
+    path('analyze-roster/', csrf_exempt(views.AnalyzeRosterView.as_view()), name='analyze-roster-with-slash'),
 ]
+
