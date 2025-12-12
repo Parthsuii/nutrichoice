@@ -129,7 +129,7 @@ class ScanFoodView(APIView):
             return Response({"error": f"Analysis failed: {str(e)}"}, status=500)
 
 # ==========================================
-# 4. ROSTER ANALYZER (Updated with Mistral Fallback)
+# 4. ROSTER ANALYZER (Updated with Robust Parsing)
 # ==========================================
 
 @method_decorator(csrf_exempt, name='dispatch') # <--- FIX FOR 403 ERROR
@@ -149,18 +149,20 @@ class AnalyzeRosterView(APIView):
 
         image_file = request.FILES['file']
         
+        # --- ENHANCED PROMPT FOR ROBUST JSON ---
         prompt_text = """
-        Analyze this timetable/roster image. 
-        Extract the schedule for each day of the week.
-        Return strictly valid JSON format ONLY. 
-        Structure:
+        STRICT INSTRUCTION: Act as a structured data extraction API.
+        Analyze the timetable/roster image. Extract the schedule for each day of the week.
+        Your ENTIRE response MUST be ONLY a single, valid JSON object. DO NOT include ANY commentary, markdown, or surrounding text.
+
+        JSON Format Required:
         {
             "weekly_schedule": {
-                "Monday": [ {"time": "10:00", "event": "Math"} ],
-                "Tuesday": [ {"time": "09:00", "event": "Science"} ]
+                "Monday": [ {"time": "10:00", "event": "Math Class"}, {"time": "11:30", "event": "Science Lab"} ],
+                "Tuesday": [ {"time": "09:00", "event": "History Lecture"} ]
             }
         }
-        If a day is missing, do not include it. Time format should be HH:MM or simple string.
+        If a day has no events, use an empty array. Time format can be HH:MM or AM/PM string.
         """
 
         analysis_data = None
@@ -204,17 +206,30 @@ class AnalyzeRosterView(APIView):
         # --- FINAL PROCESSING ---
         if analysis_data:
             try:
-                # Clean the JSON (remove ```json markers)
-                clean_json = analysis_data.strip().replace("```json", "").replace("```", "").strip()
+                # 1. Aggressively clean the JSON output 
+                clean_json = analysis_data.strip()
+                if clean_json.startswith("```json"):
+                    clean_json = clean_json.split('\n', 1)[-1].strip()
+                if clean_json.endswith("```"):
+                    clean_json = clean_json[:-3].strip()
+
                 data = json.loads(clean_json)
                 
-                # Add the source so you know which AI worked
+                # 2. STRICT VALIDATION: Check for the required top-level key
+                if 'weekly_schedule' not in data or not isinstance(data['weekly_schedule'], dict):
+                    # If AI returned JSON but without the key, raise an error
+                    raise ValueError("'weekly_schedule' key is missing or not a dictionary.")
+
                 data['ai_source'] = source_name 
-                
-                return Response(data) # Returns the JSON the Flutter app expects
+                return Response(data)
                 
             except Exception as e:
-                return Response({"error": f"JSON Parsing Error: {str(e)}", "raw": analysis_data}, status=500)
+                # If JSON parsing or key check fails, return a specific error
+                print(f"JSON Structure Error: {e}")
+                return Response({
+                    "error": f"AI returned unusable data. Failed to parse final JSON ({source_name}).", 
+                    "raw_output": analysis_data
+                }, status=500)
         
         return Response({"error": "All AI services failed to analyze the roster."}, status=500)
 
