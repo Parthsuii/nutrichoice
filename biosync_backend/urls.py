@@ -22,7 +22,7 @@ urlpatterns = [
     path('admin/', admin.site.urls),
 
     # --- API Endpoints (Matches your Flutter App) ---
-    path('analyze-roster', views.analyze_roster, name='analyze_roster'),
+    path('analyze-roster/', views.analyze_roster, name='analyze_roster'),
     path('log-meal', views.log_meal, name='log_meal'),
     path('snap-meal', views.snap_meal, name='snap_meal'),
     path('calculate-score', views.calculate_score, name='calculate_score'),
