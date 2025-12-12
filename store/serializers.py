@@ -1,17 +1,17 @@
 from rest_framework import serializers
 from .models import FoodItem, UserProfile
 
-# 1. Food Item Serializer (Updated with carbs/fat)
+# 1. Food Item Serializer
 class FoodItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = FoodItem
         fields = ['id', 'name', 'calories', 'protein', 'carbs', 'fat']
 
-# 2. Image Upload Serializer (CRITICAL: Needed for the Scanner Button)
+# 2. Image Upload Serializer (This was missing in your last snippet!)
 class FoodImageSerializer(serializers.Serializer):
     image = serializers.ImageField()
 
-# 3. User Profile Serializer (Fixed indentation)
+# 3. User Profile Serializer (Moved OUTSIDE the FoodItemSerializer)
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserProfile
