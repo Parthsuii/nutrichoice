@@ -69,7 +69,7 @@ class _RosterScreenState extends State<RosterScreen> {
 
     setState(() => _hasUnsavedChanges = false);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✅ Synced with BioSync OS!"), backgroundColor: Colors.green));
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✅ Saved & Synced!"), backgroundColor: Colors.green));
   }
 
   // --- MODE 1: MANUAL ENTRY ---
@@ -82,7 +82,7 @@ class _RosterScreenState extends State<RosterScreen> {
     setState(() {
       if (_weeklySchedule[day] == null) _weeklySchedule[day] = [];
       _weeklySchedule[day]!.add({"time": _timeController.text, "event": _eventController.text});
-      _weeklySchedule[day]!.sort((a, b) => a['time'].compareTo(b['time'])); // Auto-sort by time
+      _weeklySchedule[day]!.sort((a, b) => a['time'].compareTo(b['time'])); 
       _hasUnsavedChanges = true;
     });
     _timeController.clear();
@@ -111,17 +111,33 @@ class _RosterScreenState extends State<RosterScreen> {
     }
   }
 
+  // --- UPDATED FUNCTION: ADDED REFERER & ORIGIN HEADERS ---
   Future<void> _uploadImageForAnalysis(File imageFile) async {
     setState(() => _isScanning = true);
     try {
-      var request = http.MultipartRequest('POST', Uri.parse('https://nutrichoice-xvpf.onrender.com/analyze-roster'));
+      final baseUrl = 'https://nutrichoice-xvpf.onrender.com';
+      var uri = Uri.parse('$baseUrl/analyze-roster');
+      var request = http.MultipartRequest('POST', uri);
+
+      // FIX: Add these headers to bypass Django's HTTPS Referer check
+      request.headers.addAll({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Referer': '$baseUrl/', // Must match server URL with trailing slash
+        'Origin': baseUrl,      // Must match server URL
+      });
+
       request.files.add(await http.MultipartFile.fromPath('file', imageFile.path));
+      
+      print("Sending request to $uri with headers...");
       var response = await http.Response.fromStream(await request.send());
+
+      print("Server Response Code: ${response.statusCode}");
 
       if (response.statusCode == 200) {
         final dynamic rawData = jsonDecode(response.body);
         Map<String, dynamic> scheduleData = {};
 
+        // Robust parsing
         if (rawData is Map<String, dynamic>) {
           if (rawData.containsKey('weekly_schedule') && rawData['weekly_schedule'] is Map) {
             scheduleData = rawData['weekly_schedule'];
@@ -140,18 +156,20 @@ class _RosterScreenState extends State<RosterScreen> {
         if (parsedSchedule.isNotEmpty) {
           setState(() {
             _weeklySchedule = parsedSchedule;
-            _hasUnsavedChanges = true;
-            _selectedMode = 0; // <--- AUTO-SWITCH TO MANUAL MODE FOR EDITING
+            _selectedMode = 0; 
           });
-          _showSuccess("Scan Complete! Add missing events above if needed.");
+          
+          await _saveSchedule(); // Auto-save immediately
+          _showSuccess("Schedule Updated!");
         } else {
           _showError("AI returned empty schedule.");
         }
       } else {
+        print("Server Error Body: ${response.body}");
         _showError("Server Error: ${response.statusCode}");
       }
     } catch (e) {
-      _showError("Connection Failed: $e");
+      _showError("Connection Error: $e");
     } finally {
       setState(() => _isScanning = false);
     }
@@ -159,7 +177,6 @@ class _RosterScreenState extends State<RosterScreen> {
 
   // --- MODE 3: CALENDAR ---
   Future<void> _importFromCalendar() async {
-    // ... (Calendar Permissions/Logic same as before) ...
     var permissions = await _deviceCalendarPlugin.requestPermissions();
     if (!permissions.isSuccess || !permissions.data!) {
       _showError("Calendar Permission Denied");
@@ -213,10 +230,10 @@ class _RosterScreenState extends State<RosterScreen> {
 
       setState(() {
         _weeklySchedule.addAll(newEvents);
-        _hasUnsavedChanges = true;
-        _selectedMode = 0; // <--- AUTO-SWITCH TO MANUAL MODE
+        _selectedMode = 0; 
       });
-      _showSuccess("Imported ${eventsResult.data!.length} events.");
+      await _saveSchedule(); 
+      
     } else {
       _showError("No upcoming events found.");
     }
@@ -239,11 +256,15 @@ class _RosterScreenState extends State<RosterScreen> {
     });
   }
 
-  void _clearAll() {
+  void _clearAll() async {
     setState(() {
       _weeklySchedule = {};
-      _hasUnsavedChanges = true;
+      _hasUnsavedChanges = false;
     });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('weekly_schedule');
+    await prefs.remove('saved_schedule_text');
+    _showSuccess("Schedule cleared.");
   }
 
   void _showError(String msg) {

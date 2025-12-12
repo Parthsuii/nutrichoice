@@ -34,7 +34,6 @@ INSTALLED_APPS = [
     'corsheaders',
     'app', 
     'store',
-   
 ]
 
 MIDDLEWARE = [
@@ -128,3 +127,22 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+# ========================================================
+#  CRITICAL SECURITY SETTINGS FOR MOBILE APPS (FLUTTER)
+# ========================================================
+
+# 1. CORS: Allow the mobile app to talk to the server
+CORS_ALLOW_ALL_ORIGINS = True  
+# If you want to be stricter later, you can use: CORS_ALLOWED_ORIGINS = ["https://..."]
+
+# 2. CSRF: Trust requests coming from your HTTPS Render URL
+# This fixes the "Origin checking failed" error on HTTPS
+CSRF_TRUSTED_ORIGINS = [
+    "https://nutrichoice-xvpf.onrender.com",
+]
+
+# 3. COOKIES: Ensure cookies work over HTTPS
+CSRF_COOKIE_SECURE = True
+SESSION_COOKIE_SECURE = True
