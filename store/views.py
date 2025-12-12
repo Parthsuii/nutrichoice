@@ -31,16 +31,19 @@ if GOOGLE_KEY:
 
 # --- HELPER: Convert Image to Base64 ---
 def encode_image(image_file):
+    # This function is correct and already used.
+    image_file.seek(0) # Ensure pointer is at the start
     return base64.b64encode(image_file.read()).decode('utf-8')
 
 # ==========================================
 # 1. STANDARD CRUD VIEWS (FOOD ITEMS)
+# ... (UNMODIFIED)
 # ==========================================
 
 class FoodItemList(ListCreateAPIView):
     queryset = FoodItem.objects.all()
     serializer_class = FoodItemSerializer
-    authentication_classes = [] # Allows access without login
+    authentication_classes = [] 
     permission_classes = []
 
 class FoodItemDetail(RetrieveUpdateDestroyAPIView):
@@ -51,9 +54,10 @@ class FoodItemDetail(RetrieveUpdateDestroyAPIView):
 
 # ==========================================
 # 2. AI TEXT ENDPOINT (Nutrition Q&A)
+# ... (UNMODIFIED)
 # ==========================================
 
-@csrf_exempt  # <--- FIX FOR 403 ERROR
+@csrf_exempt
 @api_view(['POST'])
 @authentication_classes([])
 @permission_classes([])
@@ -71,12 +75,13 @@ def ask_nutritionist(request):
 
 # ==========================================
 # 3. FOOD SCANNER (With CSRF Fix)
+# ... (UNMODIFIED)
 # ==========================================
 
-@method_decorator(csrf_exempt, name='dispatch') # <--- FIX FOR 403 ERROR
+@method_decorator(csrf_exempt, name='dispatch')
 class ScanFoodView(APIView):
     parser_classes = (MultiPartParser, FormParser)
-    authentication_classes = [] # Allow public access
+    authentication_classes = [] 
     permission_classes = []
 
     def post(self, request, *args, **kwargs):
@@ -129,15 +134,15 @@ class ScanFoodView(APIView):
             return Response({"error": f"Analysis failed: {str(e)}"}, status=500)
 
 # ==========================================
-# 4. ROSTER ANALYZER (Updated with Robust Parsing)
+# 4. ROSTER ANALYZER (Updated with Groq Two-Step Fallback)
 # ==========================================
 
-@method_decorator(csrf_exempt, name='dispatch') # <--- FIX FOR 403 ERROR
+@method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):
     """
     Endpoint for the Roster/Schedule Flutter App.
     Accepts an image, returns a Weekly Schedule JSON.
-    Tries Gemini first, falls back to Mistral (Pixtral) if needed.
+    Tries Gemini, then Mistral, then Groq (2-step process).
     """
     parser_classes = (MultiPartParser, FormParser)
     authentication_classes = []
@@ -149,7 +154,6 @@ class AnalyzeRosterView(APIView):
 
         image_file = request.FILES['file']
         
-        # --- ENHANCED PROMPT FOR ROBUST JSON ---
         prompt_text = """
         STRICT INSTRUCTION: Act as a structured data extraction API.
         Analyze the timetable/roster image. Extract the schedule for each day of the week.
@@ -167,10 +171,14 @@ class AnalyzeRosterView(APIView):
 
         analysis_data = None
         source_name = "None"
+        
+        # --- Store current file position ---
+        original_file_position = image_file.tell()
 
         # --- ATTEMPT 1: GEMINI VISION ---
         try:
             print("Attempting Roster Scan with Gemini...")
+            image_file.seek(0)
             pil_image = Image.open(image_file)
             model = genai.GenerativeModel('gemini-2.0-flash-exp')
             response = model.generate_content([prompt_text, pil_image])
@@ -184,7 +192,7 @@ class AnalyzeRosterView(APIView):
             if MISTRAL_KEY:
                 try:
                     print("Switching to Mistral Pixtral for Roster...")
-                    image_file.seek(0) # Reset file pointer
+                    image_file.seek(0)
                     base64_image = encode_image(image_file)
                     
                     client = Mistral(api_key=MISTRAL_KEY)
@@ -203,6 +211,42 @@ class AnalyzeRosterView(APIView):
                 except Exception as e_mistral:
                     print(f"Mistral Roster Failed: {e_mistral}")
 
+            # --- ATTEMPT 3 (NEW): GROQ Text Extraction + JSON Conversion ---
+            if GROQ_KEY and not analysis_data:
+                try:
+                    print("Switching to GROQ/Gemini Combo (Two-Step OCR)...")
+                    image_file.seek(0)
+                    base64_image = encode_image(image_file)
+                    
+                    # Step 1: Groq for raw text extraction
+                    raw_text_prompt = "Extract all text and tabular schedule data from this image, listing the day, time, and event clearly. Do not format as JSON."
+                    client = Groq(api_key=GROQ_KEY)
+                    raw_completion = client.chat.completions.create(
+                        model="llama3-8b-8192", 
+                        messages=[{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": raw_text_prompt}, 
+                                {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_image}"}
+                            ]
+                        }]
+                    )
+                    raw_text_output = raw_completion.choices[0].message.content
+                    
+                    # Step 2: Gemini for reliable text-to-JSON conversion
+                    json_prompt = f"""
+                    STRICTLY CONVERT the following raw schedule data into the requested JSON format. 
+                    RAW DATA: {raw_text_output}
+                    JSON FORMAT: {prompt_text}
+                    """
+                    model = genai.GenerativeModel('gemini-2.0-flash-exp')
+                    json_response = model.generate_content(json_prompt)
+                    analysis_data = json_response.text
+                    source_name = "Groq/Gemini"
+                    
+                except Exception as e_groq_combo:
+                    print(f"GROQ/Gemini Combo Failed: {e_groq_combo}")
+
         # --- FINAL PROCESSING ---
         if analysis_data:
             try:
@@ -216,9 +260,9 @@ class AnalyzeRosterView(APIView):
                 data = json.loads(clean_json)
                 
                 # 2. STRICT VALIDATION: Check for the required top-level key
-                if 'weekly_schedule' not in data or not isinstance(data['weekly_schedule'], dict):
-                    # If AI returned JSON but without the key, raise an error
-                    raise ValueError("'weekly_schedule' key is missing or not a dictionary.")
+                if 'weekly_schedule' not in data or not isinstance(data.get('weekly_schedule'), dict):
+                    # If AI returned JSON but without the required key, this means the extraction failed.
+                    raise ValueError("AI returned JSON but structure is invalid or missing 'weekly_schedule' key.")
 
                 data['ai_source'] = source_name 
                 return Response(data)
@@ -228,13 +272,15 @@ class AnalyzeRosterView(APIView):
                 print(f"JSON Structure Error: {e}")
                 return Response({
                     "error": f"AI returned unusable data. Failed to parse final JSON ({source_name}).", 
-                    "raw_output": analysis_data
+                    "raw_output": analysis_data # Return the raw output for debugging
                 }, status=500)
         
+        # This will be hit if ALL three attempts failed to produce extractable data
         return Response({"error": "All AI services failed to analyze the roster."}, status=500)
 
 # ==========================================
 # 5. USER PROFILE & MEAL PLANNING
+# ... (UNMODIFIED)
 # ==========================================
 
 @csrf_exempt
@@ -242,7 +288,7 @@ class AnalyzeRosterView(APIView):
 @authentication_classes([])
 @permission_classes([])
 def user_profile_view(request):
-    # ... (Your existing Profile Logic) ...
+    # ... (Logic remains the same) ...
     if not User.objects.exists():
         try: User.objects.create_superuser('admin', 'admin@example.com', 'admin123')
         except: pass 
@@ -264,9 +310,7 @@ def user_profile_view(request):
 @authentication_classes([])
 @permission_classes([])
 def generate_meal_plan(request):
-    """
-    Generates a full day's meal plan based on Goal, Calories, and Context.
-    """
+    # ... (Logic remains the same) ...
     user_goal = request.data.get('user_goal', 'Maintain')
     calories = request.data.get('daily_calories', 2000)
     context = request.data.get('activity_context', 'Standard Day')
@@ -309,9 +353,7 @@ def generate_meal_plan(request):
 @authentication_classes([])
 @permission_classes([])
 def swap_meal(request):
-    """
-    Swaps a SINGLE meal for a new option while keeping the context.
-    """
+    # ... (Logic remains the same) ...
     context = request.data.get('activity_context', 'Standard Day')
     user_goal = request.data.get('user_goal', 'Maintain')
     
