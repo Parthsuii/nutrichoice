@@ -111,33 +111,34 @@ class _RosterScreenState extends State<RosterScreen> {
     }
   }
 
-  // --- UPDATED FUNCTION: ADDED REFERER & ORIGIN HEADERS ---
+  // --- UPDATED FUNCTION: CLEAN REQUEST (No Browser Headers) ---
   Future<void> _uploadImageForAnalysis(File imageFile) async {
     setState(() => _isScanning = true);
     try {
-      final baseUrl = 'https://nutrichoice-xvpf.onrender.com';
-      var uri = Uri.parse('$baseUrl/analyze-roster');
+      // 1. Point to your endpoint
+      var uri = Uri.parse('https://nutrichoice-xvpf.onrender.com/analyze-roster');
+      
+      // 2. Create the Multipart Request
       var request = http.MultipartRequest('POST', uri);
 
-      // FIX: Add these headers to bypass Django's HTTPS Referer check
+      // 3. MINIMAL HEADERS ONLY
+      // Removing 'Referer' and 'Origin' stops Django from checking for CSRF cookies
       request.headers.addAll({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Referer': '$baseUrl/', // Must match server URL with trailing slash
-        'Origin': baseUrl,      // Must match server URL
+        'User-Agent': 'BioSyncApp/1.0', 
+        'Accept': 'application/json',
       });
 
       request.files.add(await http.MultipartFile.fromPath('file', imageFile.path));
       
-      print("Sending request to $uri with headers...");
+      print("Sending clean request to $uri...");
       var response = await http.Response.fromStream(await request.send());
 
-      print("Server Response Code: ${response.statusCode}");
+      print("Response: ${response.statusCode}");
 
       if (response.statusCode == 200) {
         final dynamic rawData = jsonDecode(response.body);
         Map<String, dynamic> scheduleData = {};
 
-        // Robust parsing
         if (rawData is Map<String, dynamic>) {
           if (rawData.containsKey('weekly_schedule') && rawData['weekly_schedule'] is Map) {
             scheduleData = rawData['weekly_schedule'];
@@ -158,15 +159,14 @@ class _RosterScreenState extends State<RosterScreen> {
             _weeklySchedule = parsedSchedule;
             _selectedMode = 0; 
           });
-          
-          await _saveSchedule(); // Auto-save immediately
+          await _saveSchedule();
           _showSuccess("Schedule Updated!");
         } else {
           _showError("AI returned empty schedule.");
         }
       } else {
-        print("Server Error Body: ${response.body}");
-        _showError("Server Error: ${response.statusCode}");
+        print("Server Error: ${response.body}");
+        _showError("Server Blocked Request (${response.statusCode})");
       }
     } catch (e) {
       _showError("Connection Error: $e");
