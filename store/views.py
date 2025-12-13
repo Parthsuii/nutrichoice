@@ -53,15 +53,19 @@ def safe_json_extract(text):
 # THE VISION SWARM (OpenRouter Only - Reliable Free Tier)
 # =========================================================================
 def scan_with_openrouter(prompt, base64_img):
-    if not OPENROUTER_KEY: return None, None
+    if not OPENROUTER_KEY: 
+        print("CRITICAL ERROR: OPENROUTER_API_KEY is missing from environment variables!")
+        return None, None
     
-    # The "Swarm": A list of free models. 
-    # If the first one is busy (429), we instantly try the next.
+    # Expanded "Swarm" List (6 Models)
+    # The code will loop through these until one works.
     models = [
-        "google/gemini-2.0-flash-exp:free",      # Fast & Smart
-        "qwen/qwen-2.5-vl-72b-instruct:free",    # High Accuracy
-        "google/gemini-1.5-flash:free",          # Reliable Backup
-        "meta-llama/llama-3.2-11b-vision-instruct:free", # Backup
+        "google/gemini-2.0-flash-exp:free",      # 1. Best (Google)
+        "google/gemini-1.5-flash:free",          # 2. Reliable Backup (Google)
+        "qwen/qwen-2.5-vl-72b-instruct:free",    # 3. High Accuracy (Alibaba)
+        "qwen/qwen-2-vl-7b-instruct:free",       # 4. Faster/Smaller Qwen
+        "meta-llama/llama-3.2-11b-vision-instruct:free", # 5. Llama (Meta)
+        "microsoft/phi-3.5-vision-instruct:free" # 6. Phi (Microsoft) - Very reliable
     ]
 
     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
@@ -83,8 +87,17 @@ def scan_with_openrouter(prompt, base64_img):
             # If we get here, it worked!
             return completion.choices[0].message.content, f"OpenRouter {model}"
         except Exception as e:
-            # Rate limit or Busy? Log it and try the next model.
-            print(f"Model {model} failed: {e}")
+            err_str = str(e)
+            print(f"Model {model} failed. Reason: {err_str}")
+            
+            # IMPROVEMENT 1: Specific Error Handling
+            if "401" in err_str:
+                print("STOPPING: Your API Key is Invalid (401). Please check .env settings.")
+                break # Stop trying models if the key is wrong
+            
+            if "429" in err_str:
+                print(f"RATE LIMIT (429) on {model}. Switching to next model...")
+
             time.sleep(0.5)
             continue 
             
@@ -131,7 +144,7 @@ def ai_status_check(request):
     return Response(results)
 
 # ==========================================
-# 2. ROSTER SCANNER (Stable - No HF Fallback)
+# 2. ROSTER SCANNER (Stable - OpenRouter Only)
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):
@@ -150,15 +163,16 @@ class AnalyzeRosterView(APIView):
         Format:
         {
           "weekly_schedule": {
-            "Monday": [{"time": "...", "event": "..."}]
+            "Monday": [{"time": "HH:MM", "event": "Class Name"}]
           }
         }
+        Use 24-hour format (e.g. 14:00) if possible.
         If unsure, list detected classes under Monday.
         """
 
         print("--- STARTING SCAN ---")
 
-        # ONLY use OpenRouter (Reliable Vision)
+        # ONLY use OpenRouter (Reliable Vision Swarm)
         data, source = scan_with_openrouter(prompt, base64_img)
 
         print(f"DEBUG: Source used: {source}")
@@ -181,7 +195,16 @@ class AnalyzeRosterView(APIView):
                 for d in days:
                     if d not in json_data["weekly_schedule"]:
                         json_data["weekly_schedule"][d] = []
-                        
+                
+                # IMPROVEMENT 2: Sort events by time
+                for day, events in json_data["weekly_schedule"].items():
+                    if isinstance(events, list):
+                        try:
+                            # Sorts "09:00" before "10:00"
+                            events.sort(key=lambda x: x.get("time", ""))
+                        except Exception:
+                            pass
+
                 json_data['ai_source'] = source
                 return Response(json_data)
 
