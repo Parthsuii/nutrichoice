@@ -12,6 +12,7 @@ import os
 import base64
 import json
 import time
+import requests  # <--- REQUIRED FOR RAW HEALTH CHECK
 
 # --- HYBRID LIBRARIES ---
 from openai import OpenAI  # For OpenRouter
@@ -87,7 +88,7 @@ def scan_with_openrouter(prompt, base64_img):
     return None, None
 
 # =========================================================================
-# LAYER 2: HUGGING FACE CHAT (Qwen 2-VL)
+# LAYER 2: HUGGING FACE CHAT (Qwen 2-VL with Requests Retry)
 # =========================================================================
 def scan_with_hf_chat(prompt, base64_img):
     if not HF_KEY: return None, None
@@ -155,7 +156,7 @@ def scan_with_specialized_vision(prompt, base64_img):
     return None, None
 
 # ==========================================
-# 1. DIAGNOSTIC ENDPOINT (NUCLEAR OPTION)
+# 1. DIAGNOSTIC ENDPOINT (BULLETPROOF RAW REQUEST)
 # ==========================================
 @csrf_exempt 
 @api_view(['GET'])
@@ -182,17 +183,28 @@ def ai_status_check(request):
                 results["OpenRouter"] = f"Warning: {str(e)[:50]}"
     else: results["OpenRouter"] = "MISSING KEY"
 
-    # HF Check (Using DistilBERT - The "Always Online" Model)
+    # HF Check (Raw Requests Call - Bypasses InferenceClient Bugs)
     if HF_KEY:
         try:
-            client = InferenceClient(api_key=HF_KEY)
-            # Text Classification is the cheapest, most stable inference task
-            client.text_classification(
-                model="distilbert-base-uncased-finetuned-sst-2-english", 
-                text="Ping"
+            headers = {
+                "Authorization": f"Bearer {HF_KEY}",
+                "Content-Type": "application/json",
+            }
+            payload = {"inputs": "Ping"}
+
+            # Direct call to the DistilBERT API URL
+            r = requests.post(
+                "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english",
+                headers=headers,
+                json=payload,
+                timeout=10,
             )
-            results["HuggingFace"] = "SUCCESS"
-        except Exception as e: 
+
+            if r.status_code == 200:
+                results["HuggingFace"] = "SUCCESS"
+            else:
+                results["HuggingFace"] = f"FAILED: {r.status_code} - {r.text[:50]}"
+        except Exception as e:
             results["HuggingFace"] = f"FAILED: {str(e)[:50]}"
     else: results["HuggingFace"] = "MISSING KEY"
 
@@ -302,11 +314,13 @@ class ScanFoodView(APIView):
 @authentication_classes([])
 @permission_classes([])
 def user_profile_view(request):
+    # Only create admin in DEBUG mode
     if settings.DEBUG and not User.objects.exists():
         try: User.objects.create_superuser('admin', 'admin@example.com', 'admin123')
         except: pass 
     
     user = User.objects.first()
+    # In production with no users, return 404 instead of crashing
     if not user: return Response({"error": "No users found"}, status=404)
 
     profile, _ = UserProfile.objects.get_or_create(user=user)
@@ -329,7 +343,6 @@ def generate_meal_plan(request):
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([])
-@permission_classes([])
 def swap_meal(request):
     try: return Response({"name": "New Meal"})
     except: return Response({"error": "Error"}, status=500)
