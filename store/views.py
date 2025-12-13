@@ -9,6 +9,7 @@ from django.contrib.auth.models import User
 import os
 import base64
 import json
+import time # Added for small delays between retries
 
 # --- HYBRID LIBRARIES ---
 from openai import OpenAI  # For OpenRouter
@@ -29,16 +30,22 @@ def encode_image(image_file):
     image_file.seek(0)
     return base64.b64encode(image_file.read()).decode('utf-8')
 
-# --- STRATEGY 1: OPENROUTER (Gemini Team) ---
+# --- STRATEGY 1: OPENROUTER (The "Swarm") ---
 def scan_with_openrouter(prompt, base64_img):
     if not OPENROUTER_KEY: return None, None
     
-    # Priority List: 
-    # 1. Gemini 2.0 Flash (Newest/Best Free)
-    # 2. Gemini 1.5 Flash (Most Reliable Free)
+    # EXPANDED PRIORITY LIST (To defeat 429 Busy Errors)
+    # 1. Gemini 2.0 Flash (Fastest)
+    # 2. Gemini 2.0 Pro (New & Powerful)
+    # 3. Gemini 1.5 Flash (Old Reliable Backup)
+    # 4. Llama 3.2 11B (Meta's Free Vision)
+    # 5. Qwen 2.5 72B (Open Source King)
     models = [
-        "google/gemini-2.0-flash-exp:free", 
-        "google/gemini-1.5-flash:free"
+        "google/gemini-2.0-flash-exp:free",
+        "google/gemini-2.0-pro-exp-02-05:free",
+        "google/gemini-1.5-flash:free",
+        "meta-llama/llama-3.2-11b-vision-instruct:free",
+        "qwen/qwen-2.5-vl-72b-instruct:free"
     ]
 
     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
@@ -60,16 +67,17 @@ def scan_with_openrouter(prompt, base64_img):
             return completion.choices[0].message.content, f"OpenRouter {model}"
         except Exception as e:
             print(f"OpenRouter {model} failed: {e}")
-            continue # Try the next model
+            time.sleep(1) # Wait 1s before trying the next model to be polite
+            continue 
             
     return None, None
 
-# --- STRATEGY 2: HUGGING FACE (Qwen Team) ---
+# --- STRATEGY 2: HUGGING FACE (Stable Backup) ---
 def scan_with_huggingface(prompt, base64_img):
     if not HF_KEY: return None, None
     
-    # Switch to 7B model (Likely to be available/free) instead of 72B
-    model_id = "Qwen/Qwen2.5-VL-7B-Instruct"
+    # Switch to the OLDER stable model (Qwen2 instead of 2.5) to fix 404s
+    model_id = "Qwen/Qwen2-VL-7B-Instruct" 
     
     client = InferenceClient(api_key=HF_KEY)
 
@@ -83,7 +91,6 @@ def scan_with_huggingface(prompt, base64_img):
             ]
         }]
         
-        # Use chat_completion which handles vision correctly
         completion = client.chat_completion(
             model=model_id,
             messages=messages,
@@ -102,7 +109,7 @@ def scan_with_huggingface(prompt, base64_img):
 @authentication_classes([])
 @permission_classes([])
 def ai_status_check(request):
-    """Checks if keys are valid for both platforms."""
+    """Checks OpenRouter (Flash) and Hugging Face (GPT-2)."""
     results = {}
     
     # Check OpenRouter
@@ -114,16 +121,19 @@ def ai_status_check(request):
                 messages=[{"role": "user", "content": "Hi"}]
             )
             results["OpenRouter"] = "SUCCESS"
-        except Exception as e: results["OpenRouter"] = f"FAILED: {str(e)[:50]}"
+        except Exception as e: 
+            error_msg = str(e)
+            if "429" in error_msg: results["OpenRouter"] = "BUSY (Rate Limit - Will Fallback)"
+            else: results["OpenRouter"] = f"FAILED: {error_msg[:50]}..."
     else: results["OpenRouter"] = "MISSING KEY"
 
-    # Check Hugging Face (Updated to 'gpt2' which is always online)
+    # Check Hugging Face (Using Tiny GPT-2 for reliability check)
     if HF_KEY:
         try:
             client = InferenceClient(api_key=HF_KEY)
-            client.text_generation(model="gpt2", prompt="Hi", max_new_tokens=5)
+            client.text_generation(model="gpt2", prompt="Hi", max_new_tokens=2)
             results["HuggingFace"] = "SUCCESS"
-        except Exception as e: results["HuggingFace"] = f"FAILED: {str(e)[:50]}"
+        except Exception as e: results["HuggingFace"] = f"FAILED: {str(e)[:50]}..."
     else: results["HuggingFace"] = "MISSING KEY"
 
     return Response(results)
@@ -148,10 +158,10 @@ class AnalyzeRosterView(APIView):
         Format: { "weekly_schedule": { "Monday": [{"time": "...", "event": "..."}] } }
         """
 
-        # 1. Try OpenRouter (Gemini)
+        # 1. Try OpenRouter (The Swarm)
         data, source = scan_with_openrouter(prompt, base64_img)
         
-        # 2. If Failed, Try Hugging Face (Qwen)
+        # 2. If ALL OpenRouter models fail, Try Hugging Face
         if not data:
             data, source = scan_with_huggingface(prompt, base64_img)
 
@@ -169,10 +179,10 @@ class AnalyzeRosterView(APIView):
             except Exception as e:
                 return Response({"error": "JSON Parse Error", "raw": data}, status=500)
 
-        return Response({"error": "Both OpenRouter and Hugging Face failed."}, status=500)
+        return Response({"error": "All AI models (OpenRouter & HuggingFace) failed. Please try again later."}, status=500)
 
 # ==========================================
-# 3. STANDARD VIEWS
+# 3. STANDARD VIEWS (Simplified for brevity)
 # ==========================================
 class FoodItemList(ListCreateAPIView):
     queryset = FoodItem.objects.all()
@@ -192,7 +202,6 @@ def ask_nutritionist(request):
     q = request.data.get('question')
     if not q: return Response({"error": "No question"}, 400)
     try:
-        # OpenRouter Text Model
         client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
         resp = client.chat.completions.create(
             model="google/gemini-2.0-flash-exp:free",
@@ -220,13 +229,7 @@ class ScanFoodView(APIView):
             try:
                 clean = data.strip().replace("```json", "").replace("```", "").strip()
                 j = json.loads(clean)
-                FoodItem.objects.create(
-                    name=j.get('food_name','?'), 
-                    calories=j.get('estimated_calories',0),
-                    protein=j.get('protein',0),
-                    carbs=j.get('carbs',0),
-                    fat=j.get('fat',0)
-                )
+                FoodItem.objects.create(name=j.get('food_name','?'), calories=j.get('estimated_calories',0))
                 return Response({"message": "Success", "saved_data": j})
             except: pass
         return Response({"error": "Scan failed"}, 500)
