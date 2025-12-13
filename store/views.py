@@ -36,8 +36,70 @@ def encode_image(image_file):
     return base64.b64encode(image_file.read()).decode('utf-8')
 
 # ==========================================
+# 0. AI STATUS CHECK (DIAGNOSTIC)
+# ==========================================
+
+@csrf_exempt 
+@api_view(['GET'])
+@authentication_classes([])
+@permission_classes([])
+def ai_status_check(request):
+    """Checks if AI keys are loaded and if simple API calls succeed."""
+    results = {}
+
+    # --- 1. GEMINI CHECK ---
+    if not GOOGLE_KEY:
+        results['Gemini'] = "FAILED: API Key is missing from Environment."
+    else:
+        try:
+            model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            response = model.generate_content("Say 'Gemini OK'")
+            if "Gemini OK" in response.text:
+                results['Gemini'] = "SUCCESS: Key is valid, basic text generation works."
+            else:
+                results['Gemini'] = f"WARNING: Text generation failed. Raw: {response.text}"
+        except Exception as e:
+            results['Gemini'] = f"FAILED: Connection/Auth error. {str(e)}"
+
+    # --- 2. MISTRAL CHECK ---
+    if not MISTRAL_KEY:
+        results['Mistral'] = "FAILED: API Key is missing from Environment."
+    else:
+        try:
+            client = Mistral(api_key=MISTRAL_KEY)
+            response = client.chat.complete(
+                model="mistral-tiny",
+                messages=[{"role": "user", "content": "Say 'Mistral OK'"}]
+            )
+            if "Mistral OK" in response.choices[0].message.content:
+                results['Mistral'] = "SUCCESS: Key is valid, basic text generation works."
+            else:
+                results['Mistral'] = f"WARNING: Text generation failed. Raw: {response.choices[0].message.content}"
+        except Exception as e:
+            results['Mistral'] = f"FAILED: Connection/Auth error. {str(e)}"
+
+    # --- 3. GROQ CHECK ---
+    if not GROQ_KEY:
+        results['Groq'] = "FAILED: API Key is missing from Environment."
+    else:
+        try:
+            client = Groq(api_key=GROQ_KEY)
+            completion = client.chat.completions.create(
+                model="llama3-8b-8192", 
+                messages=[{"role": "user", "content": "Say 'Groq OK'"}]
+            )
+            if "Groq OK" in completion.choices[0].message.content:
+                results['Groq'] = "SUCCESS: Key is valid, basic text generation works."
+            else:
+                results['Groq'] = f"WARNING: Text generation failed. Raw: {completion.choices[0].message.content}"
+        except Exception as e:
+            results['Groq'] = f"FAILED: Connection/Auth error. {str(e)}"
+
+    return Response({"AI Status": results})
+
+
+# ==========================================
 # 1. STANDARD CRUD VIEWS (FOOD ITEMS)
-# ... (UNMODIFIED)
 # ==========================================
 
 class FoodItemList(ListCreateAPIView):
@@ -54,7 +116,6 @@ class FoodItemDetail(RetrieveUpdateDestroyAPIView):
 
 # ==========================================
 # 2. AI TEXT ENDPOINT (Nutrition Q&A)
-# ... (UNMODIFIED)
 # ==========================================
 
 @csrf_exempt
@@ -75,7 +136,6 @@ def ask_nutritionist(request):
 
 # ==========================================
 # 3. FOOD SCANNER (With CSRF Fix)
-# ... (UNMODIFIED)
 # ==========================================
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -176,76 +236,90 @@ class AnalyzeRosterView(APIView):
         original_file_position = image_file.tell()
 
         # --- ATTEMPT 1: GEMINI VISION ---
-        try:
-            print("Attempting Roster Scan with Gemini...")
-            image_file.seek(0)
-            pil_image = Image.open(image_file)
-            model = genai.GenerativeModel('gemini-2.0-flash-exp')
-            response = model.generate_content([prompt_text, pil_image])
-            analysis_data = response.text
-            source_name = "Gemini"
-            
-        except Exception as e_gemini:
-            print(f"Gemini Roster Failed: {e_gemini}")
+        if not analysis_data and GOOGLE_KEY:
+            try:
+                print("Attempting Roster Scan with Gemini...")
+                image_file.seek(0)
+                pil_image = Image.open(image_file)
+                model = genai.GenerativeModel('gemini-2.0-flash-exp')
+                response = model.generate_content([prompt_text, pil_image])
+                
+                # Check for explicit blank response from AI
+                if response.text and response.text.strip():
+                    analysis_data = response.text
+                    source_name = "Gemini"
+                else:
+                    raise Exception("Gemini returned blank response.")
+                
+            except Exception as e_gemini:
+                print(f"Gemini Roster Failed: {e_gemini}")
 
-            # --- ATTEMPT 2: MISTRAL VISION (PIXTRAL) ---
-            if MISTRAL_KEY:
-                try:
-                    print("Switching to Mistral Pixtral for Roster...")
-                    image_file.seek(0)
-                    base64_image = encode_image(image_file)
-                    
-                    client = Mistral(api_key=MISTRAL_KEY)
-                    chat_response = client.chat.complete(
-                        model="pixtral-12b-2409",
-                        messages=[{
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt_text}, 
-                                {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_image}"}
-                            ]
-                        }]
-                    )
+        # --- ATTEMPT 2: MISTRAL VISION (PIXTRAL) ---
+        if not analysis_data and MISTRAL_KEY:
+            try:
+                print("Switching to Mistral Pixtral for Roster...")
+                image_file.seek(0) # Reset file pointer for new API call
+                base64_image = encode_image(image_file)
+                
+                client = Mistral(api_key=MISTRAL_KEY)
+                chat_response = client.chat.complete(
+                    model="pixtral-12b-2409",
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text}, 
+                            {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_image}"}
+                        ]
+                    }]
+                )
+                if chat_response.choices and chat_response.choices[0].message.content:
                     analysis_data = chat_response.choices[0].message.content
                     source_name = "Mistral"
-                except Exception as e_mistral:
-                    print(f"Mistral Roster Failed: {e_mistral}")
+                else:
+                    raise Exception("Mistral returned blank response.")
 
-            # --- ATTEMPT 3 (NEW): GROQ Text Extraction + JSON Conversion ---
-            if GROQ_KEY and not analysis_data:
-                try:
-                    print("Switching to GROQ/Gemini Combo (Two-Step OCR)...")
-                    image_file.seek(0)
-                    base64_image = encode_image(image_file)
-                    
-                    # Step 1: Groq for raw text extraction
-                    raw_text_prompt = "Extract all text and tabular schedule data from this image, listing the day, time, and event clearly. Do not format as JSON."
-                    client = Groq(api_key=GROQ_KEY)
-                    raw_completion = client.chat.completions.create(
-                        model="llama3-8b-8192", 
-                        messages=[{
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": raw_text_prompt}, 
-                                {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_image}"}
-                            ]
-                        }]
-                    )
-                    raw_text_output = raw_completion.choices[0].message.content
-                    
-                    # Step 2: Gemini for reliable text-to-JSON conversion
-                    json_prompt = f"""
-                    STRICTLY CONVERT the following raw schedule data into the requested JSON format. 
-                    RAW DATA: {raw_text_output}
-                    JSON FORMAT: {prompt_text}
-                    """
-                    model = genai.GenerativeModel('gemini-2.0-flash-exp')
-                    json_response = model.generate_content(json_prompt)
+            except Exception as e_mistral:
+                print(f"Mistral Roster Failed: {e_mistral}")
+
+        # --- ATTEMPT 3: GROQ Text Extraction + JSON Conversion (Last Resort) ---
+        if not analysis_data and GROQ_KEY and GOOGLE_KEY:
+            try:
+                print("Switching to GROQ/Gemini Combo (Two-Step OCR)...")
+                image_file.seek(0)
+                base64_image = encode_image(image_file)
+                
+                # Step 1: Groq for raw text extraction
+                raw_text_prompt = "Extract all text and tabular schedule data from this image, listing the day, time, and event clearly. Do not format as JSON."
+                client = Groq(api_key=GROQ_KEY)
+                raw_completion = client.chat.completions.create(
+                    model="llama3-8b-8192", 
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": raw_text_prompt}, 
+                            {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_image}"}
+                        ]
+                    }]
+                )
+                raw_text_output = raw_completion.choices[0].message.content
+                
+                # Step 2: Gemini for reliable text-to-JSON conversion
+                json_prompt = f"""
+                STRICTLY CONVERT the following raw schedule data into the requested JSON format. 
+                RAW DATA: {raw_text_output}
+                JSON FORMAT: {prompt_text}
+                """
+                model = genai.GenerativeModel('gemini-2.0-flash-exp')
+                json_response = model.generate_content(json_prompt)
+                
+                if json_response.text and json_response.text.strip():
                     analysis_data = json_response.text
-                    source_name = "Groq/Gemini"
-                    
-                except Exception as e_groq_combo:
-                    print(f"GROQ/Gemini Combo Failed: {e_groq_combo}")
+                    source_name = "Groq/Gemini Combo"
+                else:
+                    raise Exception("Combo returned blank JSON.")
+
+            except Exception as e_groq_combo:
+                print(f"GROQ/Gemini Combo Failed: {e_groq_combo}")
 
         # --- FINAL PROCESSING ---
         if analysis_data:
