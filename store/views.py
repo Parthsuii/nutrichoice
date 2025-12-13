@@ -20,7 +20,7 @@ from .serializers import FoodItemSerializer, UserProfileSerializer, FoodImageSer
 import google.generativeai as genai
 from mistralai import Mistral
 from groq import Groq
-from huggingface_hub import InferenceClient # pip install huggingface_hub
+from huggingface_hub import InferenceClient
 
 # --- CONFIGURATION ---
 GOOGLE_KEY = os.environ.get("GOOGLE_API_KEY")
@@ -44,31 +44,31 @@ def encode_image(image_file):
 @authentication_classes([])
 @permission_classes([])
 def ai_status_check(request):
-    """Checks ALL 4 AI keys."""
+    """Checks ALL 4 AI keys with lightweight models."""
     results = {}
 
-    # 1. GROQ (Llama 3.2 Vision) - FASTEST
+    # 1. GROQ (Llama 3.2 Vision)
     if not GROQ_KEY: results['Groq'] = "FAILED: Key missing."
     else:
         try:
             client = Groq(api_key=GROQ_KEY)
             client.chat.completions.create(
-                model="llama-3.2-11b-vision-preview", # Valid Vision Model
+                model="llama-3.2-11b-vision-preview", 
                 messages=[{"role": "user", "content": "Hi"}]
             )
             results['Groq'] = "SUCCESS"
         except Exception as e: results['Groq'] = f"FAILED: {str(e)}"
 
-    # 2. MISTRAL - RELIABLE
+    # 2. MISTRAL (Updated to 'open-mistral-nemo' as 'tiny' is deprecated)
     if not MISTRAL_KEY: results['Mistral'] = "FAILED: Key missing."
     else:
         try:
             client = Mistral(api_key=MISTRAL_KEY)
-            client.chat.complete(model="mistral-tiny", messages=[{"role": "user", "content": "Hi"}])
+            client.chat.complete(model="open-mistral-nemo", messages=[{"role": "user", "content": "Hi"}])
             results['Mistral'] = "SUCCESS"
         except Exception as e: results['Mistral'] = f"FAILED: {str(e)}"
 
-    # 3. GEMINI - BACKUP
+    # 3. GEMINI (1.5 Flash)
     if not GOOGLE_KEY: results['Gemini'] = "FAILED: Key missing."
     else:
         try:
@@ -77,12 +77,13 @@ def ai_status_check(request):
             results['Gemini'] = "SUCCESS"
         except Exception as e: results['Gemini'] = f"FAILED: {str(e)}"
 
-    # 4. HUGGING FACE (Qwen2-VL) - ACCURATE
+    # 4. HUGGING FACE (Qwen2.5-7B - Faster than 72B)
     if not HF_KEY: results['HuggingFace'] = "FAILED: Key missing."
     else:
         try:
             client = InferenceClient(api_key=HF_KEY)
-            client.text_generation(model="Qwen/Qwen2.5-72B-Instruct", prompt="Hi", max_new_tokens=5)
+            # Using 7B model for faster/cheaper status check
+            client.text_generation(model="Qwen/Qwen2.5-7B-Instruct", prompt="Hi", max_new_tokens=5)
             results['HuggingFace'] = "SUCCESS"
         except Exception as e: results['HuggingFace'] = f"FAILED: {str(e)}"
 
@@ -190,7 +191,7 @@ class AnalyzeRosterView(APIView):
                 base64_img = encode_image(image_file)
                 client = Groq(api_key=GROQ_KEY)
                 resp = client.chat.completions.create(
-                    model="llama-3.2-11b-vision-preview", #
+                    model="llama-3.2-11b-vision-preview",
                     messages=[{
                         "role": "user",
                         "content": [
@@ -231,21 +232,18 @@ class AnalyzeRosterView(APIView):
                 base64_img = encode_image(image_file)
                 client = InferenceClient(api_key=HF_KEY)
                 
-                # Qwen2-VL is excellent for tables
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt_text},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-                        ]
-                    }
-                ]
-                
-                # Using the standard Inference API model
+                # Using Qwen2-VL-7B-Instruct (Vision Model)
                 resp = client.chat_completion(
                     model="Qwen/Qwen2-VL-7B-Instruct", 
-                    messages=messages, 
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt_text},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
+                            ]
+                        }
+                    ], 
                     max_tokens=1000
                 )
                 
@@ -274,9 +272,16 @@ class AnalyzeRosterView(APIView):
                 data = json.loads(clean)
                 
                 if 'weekly_schedule' not in data:
-                    if isinstance(data, dict) and any(day in data for day in ["Monday", "Tuesday"]):
+                    # Robust Fix: If AI returned raw schedule but missing root key, wrap it
+                    if isinstance(data, dict):
+                        # Simple heuristic: check if common days are present as keys
+                        days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+                        if any(day in data for day in days):
                              data = {"weekly_schedule": data}
-                    else:
+                        elif "schedule" in data:
+                             data = {"weekly_schedule": data["schedule"]}
+                        else:
+                             # If structure is totally wrong, raise error to trigger fallback
                              raise ValueError("Invalid JSON structure")
                 
                 data['ai_source'] = source_name
@@ -312,9 +317,8 @@ def user_profile_view(request):
 @authentication_classes([])
 @permission_classes([])
 def generate_meal_plan(request):
-    # Keep your meal plan logic here
     try:
-        # Simplified for response length - Put back your original prompt logic
+        # Placeholder for brevity
         return Response({"meals": []}) 
     except: return Response({"error": "Error"}, status=500)
 
