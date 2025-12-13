@@ -11,23 +11,19 @@ from django.contrib.auth.models import User
 import os
 import base64
 import json
-from openai import OpenAI  # Standard client for OpenRouter
+from openai import OpenAI
 
 # --- IMPORTS FROM YOUR APP ---
-from .models import FoodItem, UserProfile
+from .models import FoodItem, UserProfile 
 from .serializers import FoodItemSerializer, UserProfileSerializer, FoodImageSerializer
 
 # --- CONFIGURATION ---
-# We now primarily rely on OpenRouter for everything!
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-SITE_URL = "https://nutrichoice.onrender.com"  # Optional, for OpenRouter rankings
+SITE_URL = "https://nutrichoice.onrender.com"
 APP_NAME = "NutriChoice"
 
 # --- HELPER: Call OpenRouter ---
 def call_openrouter_vision(model_name, prompt, base64_image):
-    """
-    Generic helper to call ANY vision model via OpenRouter.
-    """
     if not OPENROUTER_API_KEY:
         raise Exception("OpenRouter API Key missing.")
 
@@ -67,28 +63,28 @@ def encode_image(image_file):
 # ==========================================
 # 0. AI STATUS CHECK (DIAGNOSTIC)
 # ==========================================
-@csrf_exempt
+@csrf_exempt 
 @api_view(['GET'])
 @authentication_classes([])
 @permission_classes([])
 def ai_status_check(request):
-    """Checks if OpenRouter is working with free models."""
+    """Checks OpenRouter status with UPDATED model IDs."""
     results = {}
-
+    
     if not OPENROUTER_API_KEY:
-        return Response({"Status": "FAILED: OPENROUTER_API_KEY is missing in Render Environment."})
+        return Response({"Status": "FAILED: OPENROUTER_API_KEY is missing."})
 
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=OPENROUTER_API_KEY,
     )
 
-    # List of FREE models to test
+    # UPDATED LIST OF FREE MODELS (Corrected IDs)
     models_to_test = [
-        "google/gemini-2.0-flash-exp:free",
-        "meta-llama/llama-3.2-11b-vision-instruct:free",
-        "mistralai/pixtral-12b:free",
-        "qwen/qwen-2-vl-7b-instruct:free"
+        "google/gemini-2.0-flash-exp:free",      # Fast, sometimes busy
+        "google/gemini-2.0-pro-exp-02-05:free",  # New Pro experimental
+        "qwen/qwen-2.5-vl-72b-instruct:free",    # Replaces qwen-2-vl (Fixed 404)
+        "meta-llama/llama-3.2-11b-vision-instruct:free", # Keep as backup
     ]
 
     for model in models_to_test:
@@ -99,7 +95,11 @@ def ai_status_check(request):
             )
             results[model] = "SUCCESS"
         except Exception as e:
-            results[model] = f"FAILED: {str(e)}"
+            # Shorten error message for readability
+            error_msg = str(e)
+            if "429" in error_msg: results[model] = "BUSY (Rate Limit)"
+            elif "404" in error_msg: results[model] = "OFFLINE (404)"
+            else: results[model] = f"FAILED: {error_msg[:100]}..."
 
     return Response({"OpenRouter Status": results})
 
@@ -109,7 +109,7 @@ def ai_status_check(request):
 class FoodItemList(ListCreateAPIView):
     queryset = FoodItem.objects.all()
     serializer_class = FoodItemSerializer
-    authentication_classes = []
+    authentication_classes = [] 
     permission_classes = []
 
 class FoodItemDetail(RetrieveUpdateDestroyAPIView):
@@ -128,15 +128,15 @@ class FoodItemDetail(RetrieveUpdateDestroyAPIView):
 def ask_nutritionist(request):
     user_question = request.data.get('question')
     if not user_question: return Response({"error": "No question"}, status=400)
-
+    
     try:
-        # Using OpenRouter for text
         client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
+        # Use a solid text model for Q&A
         response = client.chat.completions.create(
-            model="google/gemini-2.0-flash-exp:free",  # Free & Fast
+            model="google/gemini-2.0-flash-exp:free", 
             messages=[{"role": "user", "content": f"You are a nutritionist. Answer briefly: {user_question}"}]
         )
-        return Response({"answer": response.choices[0].message.content, "source": "OpenRouter Gemini"})
+        return Response({"answer": response.choices[0].message.content, "source": "OpenRouter"})
     except Exception as e: return Response({"error": str(e)}, status=500)
 
 # ==========================================
@@ -145,7 +145,7 @@ def ask_nutritionist(request):
 @method_decorator(csrf_exempt, name='dispatch')
 class ScanFoodView(APIView):
     parser_classes = (MultiPartParser, FormParser)
-    authentication_classes = []
+    authentication_classes = [] 
     permission_classes = []
 
     def post(self, request, *args, **kwargs):
@@ -157,27 +157,37 @@ class ScanFoodView(APIView):
         Identify food. Estimate calories/macros. Return strictly valid JSON:
         { "food_name": "...", "estimated_calories": 0, "protein": 0.0, "carbs": 0.0, "fat": 0.0 }
         """
-        try:
-            # Using OpenRouter Vision
-            response_text = call_openrouter_vision("google/gemini-2.0-flash-exp:free", prompt, base64_img)
+        
+        # Priority list for Vision (Updated)
+        models = [
+            "google/gemini-2.0-flash-exp:free", 
+            "qwen/qwen-2.5-vl-72b-instruct:free", #
+            "google/gemini-2.0-pro-exp-02-05:free"
+        ]
 
-            clean = response_text.strip().replace("```json", "").replace("```", "").strip()
-            data = json.loads(clean)
+        for model in models:
+            try:
+                response_text = call_openrouter_vision(model, prompt, base64_img)
+                clean = response_text.strip().replace("```json", "").replace("```", "").strip()
+                data = json.loads(clean)
+                
+                new_food = FoodItem.objects.create(
+                    name=data.get('food_name', 'Unknown'),
+                    calories=int(data.get('estimated_calories', 0)),
+                    protein=float(data.get('protein', 0.0)),
+                    carbs=float(data.get('carbs', 0.0)),
+                    fat=float(data.get('fat', 0.0)),
+                )
+                return Response({"message": "Success", "saved_data": {"name": new_food.name, "calories": new_food.calories}})
+            except Exception:
+                continue # Try next model if this one fails
 
-            new_food = FoodItem.objects.create(
-                name=data.get('food_name', 'Unknown'),
-                calories=int(data.get('estimated_calories', 0)),
-                protein=float(data.get('protein', 0.0)),
-                carbs=float(data.get('carbs', 0.0)),
-                fat=float(data.get('fat', 0.0)),
-            )
-            return Response({"message": "Success", "saved_data": {"name": new_food.name, "calories": new_food.calories}})
-        except Exception as e: return Response({"error": str(e)}, status=500)
+        return Response({"error": "All vision models failed. Please try again later."}, status=500)
 
 # ==========================================
-# 4. ROSTER ANALYZER (OPENROUTER FREE CASCADE)
+# 4. ROSTER ANALYZER (UPDATED MODEL LIST)
 # ==========================================
-@method_decorator(csrf_exempt, name='dispatch')
+@method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):
     parser_classes = (MultiPartParser, FormParser)
     authentication_classes = []
@@ -189,7 +199,7 @@ class AnalyzeRosterView(APIView):
 
         image_file = request.FILES['file']
         base64_img = encode_image(image_file)
-
+        
         prompt_text = """
         STRICT INSTRUCTION: Act as a structured data extraction API.
         Analyze this timetable. Extract the weekly schedule.
@@ -205,27 +215,27 @@ class AnalyzeRosterView(APIView):
 
         analysis_data = None
         source_name = "None"
-
-        # LIST OF FREE VISION MODELS ON OPENROUTER (Priority Order)
-        # 1. Gemini 2.0 Flash (Best quality, Free)
-        # 2. Llama 3.2 11B Vision (Fastest, Free)
-        # 3. Pixtral 12B (Reliable, Free)
-        # 4. Qwen 2 VL (Open Source Standard, Free)
+        
+        # --- UPDATED PRIORITY LIST ---
+        # 1. Gemini 2.0 Flash (Best Free Vision)
+        # 2. Qwen 2.5 VL (Newest Open Source Vision) -
+        # 3. Gemini 2.0 Pro (New, powerful, free)
+        # 4. Llama 3.2 11B (Backup)
         models_to_try = [
             "google/gemini-2.0-flash-exp:free",
-            "meta-llama/llama-3.2-11b-vision-instruct:free",
-            "mistralai/pixtral-12b:free",
-            "qwen/qwen-2-vl-7b-instruct:free"
+            "qwen/qwen-2.5-vl-72b-instruct:free",
+            "google/gemini-2.0-pro-exp-02-05:free",
+            "meta-llama/llama-3.2-11b-vision-instruct:free"
         ]
 
         for model in models_to_try:
-            if analysis_data: break  # Stop if we have data
+            if analysis_data: break 
 
             try:
-                print(f"Attempting Roster Scan with {model} via OpenRouter...")
+                print(f"Attempting Roster Scan with {model}...")
                 response_text = call_openrouter_vision(model, prompt_text, base64_img)
-
-                if response_text:
+                
+                if response_text and "weekly_schedule" in response_text:
                     analysis_data = response_text
                     source_name = f"OpenRouter {model}"
             except Exception as e:
@@ -236,19 +246,17 @@ class AnalyzeRosterView(APIView):
             try:
                 clean = analysis_data.strip().replace("```json", "").replace("```", "").strip()
                 data = json.loads(clean)
-
+                
                 if 'weekly_schedule' not in data:
-                    if isinstance(data, dict):
-                        data = {"weekly_schedule": data}
-                    else:
-                        raise ValueError("Invalid JSON")
-
+                    if isinstance(data, dict): data = {"weekly_schedule": data}
+                    else: raise ValueError("Invalid JSON")
+                
                 data['ai_source'] = source_name
                 return Response(data)
             except Exception as e:
                 return Response({"error": f"JSON Error ({source_name}): {str(e)}", "raw": analysis_data}, status=500)
-
-        return Response({"error": "All OpenRouter free models failed to scan the image."}, status=500)
+        
+        return Response({"error": "All OpenRouter models failed (Busy/Offline). Try again in 10s."}, status=500)
 
 # ==========================================
 # 5. MEAL PLANNING
@@ -260,7 +268,7 @@ class AnalyzeRosterView(APIView):
 def user_profile_view(request):
     if not User.objects.exists():
         try: User.objects.create_superuser('admin', 'admin@example.com', 'admin123')
-        except: pass
+        except: pass 
     user = User.objects.first()
     profile, _ = UserProfile.objects.get_or_create(user=user)
     if request.method == 'GET': return Response(UserProfileSerializer(profile).data)
@@ -277,7 +285,7 @@ def user_profile_view(request):
 @permission_classes([])
 def generate_meal_plan(request):
     try:
-        return Response({"meals": []})
+        return Response({"meals": []}) 
     except: return Response({"error": "Error"}, status=500)
 
 @csrf_exempt
