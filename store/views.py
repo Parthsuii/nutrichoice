@@ -1,4 +1,5 @@
 from rest_framework.decorators import api_view, parser_classes, authentication_classes, permission_classes
+from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
