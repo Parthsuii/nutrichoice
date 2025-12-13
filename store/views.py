@@ -30,18 +30,18 @@ def encode_image(image_file):
     image_file.seek(0)
     return base64.b64encode(image_file.read()).decode('utf-8')
 
-# --- STRATEGY 1: OPENROUTER SWARM ---
+# --- STRATEGY 1: OPENROUTER SWARM (5 Layers of Backup) ---
 def scan_with_openrouter(prompt, base64_img):
     if not OPENROUTER_KEY: return None, None
     
-    # THE SWARM: 5 Free Models sorted by Speed/Quality
-    # If #1 is busy (429), it instantly tries #2, then #3...
+    # PRIORITY LIST (Verified Free Models):
+    # If one is busy (429) or missing (404), it tries the next.
     models = [
-        "google/gemini-2.0-flash-exp:free",      # 1. Fastest & Smartest
-        "google/gemini-1.5-flash:free",          # 2. Reliable Backup
-        "meta-llama/llama-3.2-11b-vision-instruct:free", # 3. Meta's Best Free Vision
-        "qwen/qwen-2.5-vl-72b-instruct:free",    # 4. Open Source King
-        "mistralai/pixtral-12b:free"             # 5. Mistral Backup
+        "google/gemini-2.0-flash-exp:free",       # 1. Best Vision (Fast)
+        "google/gemini-1.5-flash:free",           # 2. Most Reliable Backup
+        "meta-llama/llama-3.2-11b-vision-instruct:free", # 3. Meta's Free Vision
+        "qwen/qwen-2.5-vl-7b-instruct:free",      # 4. Open Source Vision
+        "microsoft/phi-3.5-vision-instruct:free"  # 5. Microsoft's Compact Vision
     ]
 
     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
@@ -63,7 +63,7 @@ def scan_with_openrouter(prompt, base64_img):
             return completion.choices[0].message.content, f"OpenRouter {model}"
         except Exception as e:
             print(f"OpenRouter {model} failed: {e}")
-            time.sleep(1) # Polite 1s wait before retrying next model
+            time.sleep(0.5) # Short pause before retry
             continue 
             
     return None, None
@@ -72,31 +72,37 @@ def scan_with_openrouter(prompt, base64_img):
 def scan_with_huggingface(prompt, base64_img):
     if not HF_KEY: return None, None
     
-    # Downgrade to 7B model (likely free) instead of 72B (paid/missing)
-    # Using Qwen2.5-VL-7B which is SOTA for its size
-    model_id = "Qwen/Qwen2.5-VL-7B-Instruct" 
+    # Corrected Model ID: The 7B version is free. 
+    # If Qwen fails, we try Llama.
+    hf_models = [
+        "Qwen/Qwen2-VL-7B-Instruct",             # Standard Free Vision
+        "meta-llama/Llama-3.2-11B-Vision-Instruct" # Backup
+    ]
     
     client = InferenceClient(api_key=HF_KEY)
 
-    try:
-        print(f"Switching to Hugging Face: {model_id}...")
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-            ]
-        }]
-        
-        completion = client.chat_completion(
-            model=model_id,
-            messages=messages,
-            max_tokens=1000
-        )
-        return completion.choices[0].message.content, f"HuggingFace {model_id}"
-    except Exception as e:
-        print(f"Hugging Face {model_id} failed: {e}")
-        return None, None
+    for model_id in hf_models:
+        try:
+            print(f"Switching to Hugging Face: {model_id}...")
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
+                ]
+            }]
+            
+            completion = client.chat_completion(
+                model=model_id,
+                messages=messages,
+                max_tokens=1000
+            )
+            return completion.choices[0].message.content, f"HuggingFace {model_id}"
+        except Exception as e:
+            print(f"Hugging Face {model_id} failed: {e}")
+            continue
+
+    return None, None
 
 # ==========================================
 # 1. DIAGNOSTIC ENDPOINT
@@ -109,24 +115,32 @@ def ai_status_check(request):
     """Checks Health of Both Providers."""
     results = {}
     
-    # Check OpenRouter (Gemini Flash)
+    # Check OpenRouter (Loops until one works)
     if OPENROUTER_KEY:
-        try:
-            client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
-            client.chat.completions.create(
-                model="google/gemini-2.0-flash-exp:free",
-                messages=[{"role": "user", "content": "Hi"}]
-            )
-            results["OpenRouter"] = "SUCCESS"
-        except Exception as e: 
-            # Even if it fails here (busy), the main app has 4 backups
-            results["OpenRouter"] = f"Warning: {str(e)[:50]} (App will use backups)"
+        client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
+        models_to_test = [
+            "google/gemini-2.0-flash-exp:free",
+            "google/gemini-1.5-flash:free",
+            "meta-llama/llama-3.2-11b-vision-instruct:free"
+        ]
+        status = "FAILED (All busy/offline)"
+        for model in models_to_test:
+            try:
+                client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": "Hi"}]
+                )
+                status = f"SUCCESS ({model})"
+                break
+            except: continue
+        results["OpenRouter"] = status
     else: results["OpenRouter"] = "MISSING KEY"
 
-    # Check Hugging Face (Use Tiny GPT-2 for guaranteed 200 OK)
+    # Check Hugging Face (Simple Text Check)
     if HF_KEY:
         try:
             client = InferenceClient(api_key=HF_KEY)
+            # 'gpt2' is a tiny model that is always free/online
             client.text_generation(model="gpt2", prompt="Hi", max_new_tokens=2)
             results["HuggingFace"] = "SUCCESS"
         except Exception as e: results["HuggingFace"] = f"FAILED: {str(e)[:50]}..."
@@ -157,7 +171,7 @@ class AnalyzeRosterView(APIView):
         # 1. Try The Swarm (OpenRouter)
         data, source = scan_with_openrouter(prompt, base64_img)
         
-        # 2. If ALL 5 Swarm Models Fail, Try Hugging Face
+        # 2. If ALL OpenRouter Models Fail, Try Hugging Face
         if not data:
             data, source = scan_with_huggingface(prompt, base64_img)
 
@@ -175,7 +189,7 @@ class AnalyzeRosterView(APIView):
             except Exception as e:
                 return Response({"error": "JSON Parse Error", "raw": data}, status=500)
 
-        return Response({"error": "All 6 AI models failed (Busy or Offline). Please try again in 1 minute."}, status=500)
+        return Response({"error": "All 7 AI models failed. Please try again later."}, status=500)
 
 # ==========================================
 # 3. STANDARD VIEWS
@@ -198,7 +212,6 @@ def ask_nutritionist(request):
     q = request.data.get('question')
     if not q: return Response({"error": "No question"}, 400)
     try:
-        # Use simple reliable model for text
         client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
         resp = client.chat.completions.create(
             model="google/gemini-2.0-flash-exp:free",
