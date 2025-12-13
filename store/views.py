@@ -12,7 +12,7 @@ import os
 import base64
 import json
 import time
-import requests  # <--- REQUIRED FOR RAW HEALTH CHECK
+import requests  # Required for raw API calls
 
 # --- HYBRID LIBRARIES ---
 from openai import OpenAI  # For OpenRouter
@@ -93,7 +93,7 @@ def scan_with_openrouter(prompt, base64_img):
 def scan_with_hf_chat(prompt, base64_img):
     if not HF_KEY: return None, None
     
-    # Use Qwen2-VL (older stable version) to fix 404 errors
+    # Use Qwen2-VL (older stable version) which is widely available
     model_id = "Qwen/Qwen2-VL-7B-Instruct"
     client = InferenceClient(api_key=HF_KEY)
 
@@ -156,7 +156,7 @@ def scan_with_specialized_vision(prompt, base64_img):
     return None, None
 
 # ==========================================
-# 1. DIAGNOSTIC ENDPOINT (BULLETPROOF RAW REQUEST)
+# 1. DIAGNOSTIC ENDPOINT (ACCOUNT CHECK)
 # ==========================================
 @csrf_exempt 
 @api_view(['GET'])
@@ -183,29 +183,21 @@ def ai_status_check(request):
                 results["OpenRouter"] = f"Warning: {str(e)[:50]}"
     else: results["OpenRouter"] = "MISSING KEY"
 
-    # HF Check (Raw Requests Call - Bypasses InferenceClient Bugs)
+    # HF Check (Account Validation - Never returns 410/404)
     if HF_KEY:
         try:
-            headers = {
-                "Authorization": f"Bearer {HF_KEY}",
-                "Content-Type": "application/json",
-            }
-            payload = {"inputs": "Ping"}
-
-            # Direct call to the DistilBERT API URL
-            r = requests.post(
-                "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english",
-                headers=headers,
-                json=payload,
-                timeout=10,
-            )
-
+            headers = {"Authorization": f"Bearer {HF_KEY}"}
+            # Verify the API Key itself instead of a specific model
+            r = requests.get("https://huggingface.co/api/whoami-v2", headers=headers, timeout=5)
+            
             if r.status_code == 200:
                 results["HuggingFace"] = "SUCCESS"
+            elif r.status_code == 401:
+                results["HuggingFace"] = "FAILED: Invalid API Key"
             else:
-                results["HuggingFace"] = f"FAILED: {r.status_code} - {r.text[:50]}"
+                results["HuggingFace"] = f"FAILED: {r.status_code} (API unreachable)"
         except Exception as e:
-            results["HuggingFace"] = f"FAILED: {str(e)[:50]}"
+            results["HuggingFace"] = f"FAILED: Connection Error"
     else: results["HuggingFace"] = "MISSING KEY"
 
     return Response(results)
@@ -320,7 +312,6 @@ def user_profile_view(request):
         except: pass 
     
     user = User.objects.first()
-    # In production with no users, return 404 instead of crashing
     if not user: return Response({"error": "No users found"}, status=404)
 
     profile, _ = UserProfile.objects.get_or_create(user=user)
