@@ -12,11 +12,10 @@ import os
 import base64
 import json
 import time
-import requests  # Required for raw API calls
+import requests 
 
 # --- HYBRID LIBRARIES ---
 from openai import OpenAI  # For OpenRouter
-from huggingface_hub import InferenceClient  # For Hugging Face
 
 # --- IMPORTS FROM YOUR APP ---
 from .models import FoodItem, UserProfile 
@@ -36,6 +35,7 @@ def encode_image(image_file):
 # --- HELPER: Robust JSON Extraction ---
 def safe_json_extract(text):
     """Finds the first '{' and last '}' to isolate JSON from AI chatter."""
+    if not text: return None
     try:
         start = text.find("{")
         end = text.rfind("}")
@@ -47,27 +47,28 @@ def safe_json_extract(text):
         clean = text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except:
-        raise ValueError("No valid JSON found in AI response")
+        return None
 
 # =========================================================================
-# LAYER 1: OPENROUTER SWARM (Chat VLMs)
+# THE VISION SWARM (OpenRouter Only - Reliable Free Tier)
 # =========================================================================
 def scan_with_openrouter(prompt, base64_img):
     if not OPENROUTER_KEY: return None, None
     
-    # Priority List of Free Models
+    # The "Swarm": A list of free models. 
+    # If the first one is busy (429), we instantly try the next.
     models = [
-        "google/gemini-2.0-flash-exp:free",      
-        "qwen/qwen-2.5-vl-72b-instruct:free",    
-        "google/gemini-1.5-flash:free",          
-        "meta-llama/llama-3.2-11b-vision-instruct:free",
+        "google/gemini-2.0-flash-exp:free",      # Fast & Smart
+        "qwen/qwen-2.5-vl-72b-instruct:free",    # High Accuracy
+        "google/gemini-1.5-flash:free",          # Reliable Backup
+        "meta-llama/llama-3.2-11b-vision-instruct:free", # Backup
     ]
 
     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
 
     for model in models:
         try:
-            print(f"Trying Layer 1 (OpenRouter): {model}...")
+            print(f"Trying Vision Model: {model}...")
             completion = client.chat.completions.create(
                 extra_headers={"HTTP-Referer": SITE_URL, "X-Title": APP_NAME},
                 model=model,
@@ -79,84 +80,18 @@ def scan_with_openrouter(prompt, base64_img):
                     ]
                 }]
             )
+            # If we get here, it worked!
             return completion.choices[0].message.content, f"OpenRouter {model}"
         except Exception as e:
-            print(f"OpenRouter {model} failed: {e}")
+            # Rate limit or Busy? Log it and try the next model.
+            print(f"Model {model} failed: {e}")
             time.sleep(0.5)
             continue 
             
     return None, None
 
-# =========================================================================
-# LAYER 2: HUGGING FACE CHAT (Qwen 2-VL with Requests Retry)
-# =========================================================================
-def scan_with_hf_chat(prompt, base64_img):
-    if not HF_KEY: return None, None
-    
-    # Use Qwen2-VL (older stable version) which is widely available
-    model_id = "Qwen/Qwen2-VL-7B-Instruct"
-    client = InferenceClient(api_key=HF_KEY)
-
-    for attempt in range(2): 
-        try:
-            print(f"Trying Layer 2 (HF Chat): {model_id} (Attempt {attempt+1})...")
-            completion = client.chat_completion(
-                model=model_id,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_img}"
-                        }}
-                    ]
-                }],
-                max_tokens=800
-            )
-            return completion.choices[0].message.content, f"HuggingFace {model_id}"
-        except Exception as e:
-            print(f"Layer 2 failed (Attempt {attempt+1}): {e}")
-            time.sleep(1)
-
-    return None, None
-
-# =========================================================================
-# LAYER 3: SPECIALIZED VISION (Florence-2 / Moondream)
-# =========================================================================
-def scan_with_specialized_vision(prompt, base64_img):
-    if not HF_KEY: return None, None
-    client = InferenceClient(api_key=HF_KEY)
-    
-    # 1. Florence-2
-    try:
-        print("Trying Layer 3 (Florence-2)...")
-        florence_prompt = "<MORE_DETAILED_CAPTION>" 
-        result = client.image_to_text(
-            model="microsoft/Florence-2-large",
-            image=base64.b64decode(base64_img),
-            prompt=florence_prompt
-        )
-        return json.dumps({"raw_text": result, "note": "Parsed by Florence-2"}), "HF Florence-2"
-    except Exception as e:
-        print(f"Florence-2 failed: {e}")
-
-    # 2. Moondream2
-    try:
-        print("Trying Layer 3 (Moondream2)...")
-        answer = client.visual_question_answering(
-            image=base64.b64decode(base64_img),
-            question="Read the text in this image and describe the schedule.",
-            model="vikhyatk/moondream2"
-        )
-        final_text = answer[0]['answer'] if answer else "No text found"
-        return json.dumps({"raw_text": final_text, "note": "Parsed by Moondream"}), "HF Moondream2"
-    except Exception as e:
-        print(f"Moondream2 failed: {e}")
-
-    return None, None
-
 # ==========================================
-# 1. DIAGNOSTIC ENDPOINT (ACCOUNT CHECK)
+# 1. DIAGNOSTIC ENDPOINT (Health Check)
 # ==========================================
 @csrf_exempt 
 @api_view(['GET'])
@@ -165,7 +100,7 @@ def scan_with_specialized_vision(prompt, base64_img):
 def ai_status_check(request):
     results = {}
     
-    # OpenRouter Check
+    # 1. Check OpenRouter (Network & Key)
     if OPENROUTER_KEY:
         try:
             client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
@@ -176,34 +111,27 @@ def ai_status_check(request):
             )
             results["OpenRouter"] = "SUCCESS"
         except Exception as e:
-            # 429 means "Busy" but authenticated -> Success for setup
-            if "429" in str(e):
-                results["OpenRouter"] = "SUCCESS (Rate Limited but Connected)"
-            else:
-                results["OpenRouter"] = f"Warning: {str(e)[:50]}"
+            # 429 means "Busy" but Key is Valid -> SUCCESS
+            if "429" in str(e): results["OpenRouter"] = "SUCCESS (Rate Limited but Connected)"
+            else: results["OpenRouter"] = f"Warning: {str(e)[:50]}"
     else: results["OpenRouter"] = "MISSING KEY"
 
-    # HF Check (Account Validation - Never returns 410/404)
+    # 2. Check Hugging Face (Account Validation ONLY)
     if HF_KEY:
         try:
             headers = {"Authorization": f"Bearer {HF_KEY}"}
-            # Verify the API Key itself instead of a specific model
+            # 'whoami' is the only guaranteed free endpoint
             r = requests.get("https://huggingface.co/api/whoami-v2", headers=headers, timeout=5)
-            
-            if r.status_code == 200:
-                results["HuggingFace"] = "SUCCESS"
-            elif r.status_code == 401:
-                results["HuggingFace"] = "FAILED: Invalid API Key"
-            else:
-                results["HuggingFace"] = f"FAILED: {r.status_code} (API unreachable)"
-        except Exception as e:
-            results["HuggingFace"] = f"FAILED: Connection Error"
+            if r.status_code == 200: results["HuggingFace"] = "SUCCESS"
+            elif r.status_code == 401: results["HuggingFace"] = "FAILED: Invalid API Key"
+            else: results["HuggingFace"] = f"FAILED: {r.status_code}"
+        except Exception as e: results["HuggingFace"] = "FAILED: Connection Error"
     else: results["HuggingFace"] = "MISSING KEY"
 
     return Response(results)
 
 # ==========================================
-# 2. HYBRID ROSTER SCANNER
+# 2. ROSTER SCANNER (Stable - No HF Fallback)
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):
@@ -217,36 +145,59 @@ class AnalyzeRosterView(APIView):
         base64_img = encode_image(image_file)
         
         prompt = """
-        Extract the weekly schedule from this timetable image.
-        Return ONLY valid JSON.
-        Format: { "weekly_schedule": { "Monday": [{"time": "...", "event": "..."}] } }
+        Read this timetable image.
+        Output JSON ONLY.
+        Format:
+        {
+          "weekly_schedule": {
+            "Monday": [{"time": "...", "event": "..."}]
+          }
+        }
+        If unsure, list detected classes under Monday.
         """
 
-        # LAYER 1: OpenRouter
+        print("--- STARTING SCAN ---")
+
+        # ONLY use OpenRouter (Reliable Vision)
         data, source = scan_with_openrouter(prompt, base64_img)
+
+        print(f"DEBUG: Source used: {source}")
         
-        # LAYER 2: HF Chat
+        # If ALL models failed (Network or Rate Limits)
         if not data:
-            data, source = scan_with_hf_chat(prompt, base64_img)
+             return Response({"error": "AI Service Busy. Please try again in 1 minute."}, status=503)
 
-        # LAYER 3: Specialized Vision
-        if not data:
-            data, source = scan_with_specialized_vision(prompt, base64_img)
-
-        # Process Result
-        if data:
-            try:
-                json_data = safe_json_extract(data)
+        # Process Success
+        try:
+            json_data = safe_json_extract(data)
+            
+            # Ensure valid structure for Frontend
+            if json_data:
+                if "weekly_schedule" not in json_data:
+                    json_data = {"weekly_schedule": json_data}
+                
+                # Normalize keys (Monday-Sunday) to be safe
+                days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                for d in days:
+                    if d not in json_data["weekly_schedule"]:
+                        json_data["weekly_schedule"][d] = []
+                        
                 json_data['ai_source'] = source
                 return Response(json_data)
-            except:
-                return Response({
-                    "weekly_schedule": {"Note": "Raw text extracted (Layer 3)"},
-                    "raw_text": data,
-                    "ai_source": source
-                })
 
-        return Response({"error": "All AI models (Layers 1, 2, & 3) failed."}, status=500)
+            # Fallback: Text found but JSON parsing failed
+            clean_text = str(data)[:200].replace('"', '')
+            return Response({
+                "weekly_schedule": {
+                    "Monday": [{"time": "See Details", "event": f"Raw: {clean_text}..."}],
+                    "Tuesday": [], "Wednesday": [], "Thursday": [], "Friday": [], "Saturday": [], "Sunday": []
+                },
+                "ai_source": f"{source} (Raw Mode)"
+            })
+
+        except Exception as e:
+            print(f"Parsing Error: {e}")
+            return Response({"error": "Failed to parse timetable."}, status=500)
 
 # ==========================================
 # 3. STANDARD VIEWS
@@ -269,6 +220,7 @@ def ask_nutritionist(request):
     q = request.data.get('question')
     if not q: return Response({"error": "No question"}, 400)
     try:
+        # Use simple text model for Q&A
         client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
         resp = client.chat.completions.create(
             model="google/gemini-2.0-flash-exp:free", 
@@ -290,14 +242,15 @@ class ScanFoodView(APIView):
         b64 = encode_image(img)
         prompt = """Identify food. JSON: { "food_name": "...", "estimated_calories": 0, "protein": 0, "carbs": 0, "fat": 0 }"""
         
+        # Use OpenRouter Swarm
         data, source = scan_with_openrouter(prompt, b64)
-        if not data: data, source = scan_with_hf_chat(prompt, b64)
         
         if data:
             try:
                 j = safe_json_extract(data)
-                FoodItem.objects.create(name=j.get('food_name','?'), calories=j.get('estimated_calories',0))
-                return Response({"message": "Success", "saved_data": j})
+                if j:
+                    FoodItem.objects.create(name=j.get('food_name','?'), calories=j.get('estimated_calories',0))
+                    return Response({"message": "Success", "saved_data": j})
             except: pass
         return Response({"error": "Scan failed"}, 500)
 
@@ -306,7 +259,6 @@ class ScanFoodView(APIView):
 @authentication_classes([])
 @permission_classes([])
 def user_profile_view(request):
-    # Only create admin in DEBUG mode
     if settings.DEBUG and not User.objects.exists():
         try: User.objects.create_superuser('admin', 'admin@example.com', 'admin123')
         except: pass 

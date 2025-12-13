@@ -39,17 +39,39 @@ class _RosterScreenState extends State<RosterScreen> {
     }
   }
 
+  // --- HELPER: NORMALIZE WEEK (Fixes "Empty Screen" Bug) ---
+  Map<String, List<dynamic>> _normalizeWeek(Map<String, List<dynamic>> input) {
+    const days = [
+      "Monday",
+      "Tuesday",
+      "Wednesday",
+      "Thursday",
+      "Friday",
+      "Saturday",
+      "Sunday"
+    ];
+
+    final normalized = <String, List<dynamic>>{};
+    for (final d in days) {
+      normalized[d] = input[d] ?? [];
+    }
+    return normalized;
+  }
+
   // --- STORAGE ---
   Future<void> _loadSavedSchedule() async {
     final prefs = await SharedPreferences.getInstance();
     String? savedData = prefs.getString('weekly_schedule');
     if (savedData != null) {
       setState(() {
-        _weeklySchedule = Map<String, List<dynamic>>.from(
+        final rawMap = Map<String, List<dynamic>>.from(
           jsonDecode(savedData).map((key, value) => MapEntry(key, List<dynamic>.from(value))),
         );
+        _weeklySchedule = _normalizeWeek(rawMap);
         _hasUnsavedChanges = false;
       });
+    } else {
+        _weeklySchedule = _normalizeWeek({});
     }
   }
 
@@ -111,18 +133,15 @@ class _RosterScreenState extends State<RosterScreen> {
     }
   }
 
-  // --- UPDATED FUNCTION: CLEAN REQUEST (No Browser Headers) ---
+  // --- UPDATED FUNCTION: CORRECT API URL & SAFE PARSING ---
   Future<void> _uploadImageForAnalysis(File imageFile) async {
     setState(() => _isScanning = true);
     try {
-      // 1. Point to your endpoint
-      var uri = Uri.parse('https://nutrichoice-xvpf.onrender.com/analyze-roster/');
+      // ✅ UPDATED URL: Added '/api/' to match your backend route
+      var uri = Uri.parse('https://nutrichoice-xvpf.onrender.com/api/analyze-roster/');
       
-      // 2. Create the Multipart Request
       var request = http.MultipartRequest('POST', uri);
 
-      // 3. MINIMAL HEADERS ONLY
-      // Removing 'Referer' and 'Origin' stops Django from checking for CSRF cookies
       request.headers.addAll({
         'User-Agent': 'BioSyncApp/1.0', 
         'Accept': 'application/json',
@@ -134,6 +153,7 @@ class _RosterScreenState extends State<RosterScreen> {
       var response = await http.Response.fromStream(await request.send());
 
       print("Response: ${response.statusCode}");
+      print("Body: ${response.body}");
 
       if (response.statusCode == 200) {
         final dynamic rawData = jsonDecode(response.body);
@@ -156,9 +176,17 @@ class _RosterScreenState extends State<RosterScreen> {
 
         if (parsedSchedule.isNotEmpty) {
           setState(() {
-            _weeklySchedule = parsedSchedule;
+            final normalizedData = _normalizeWeek(parsedSchedule);
+
+            if (_weeklySchedule.isEmpty) {
+                 _weeklySchedule = _normalizeWeek({});
+            }
+            _weeklySchedule.addAll(normalizedData);
+            
             _selectedMode = 0; 
+            _hasUnsavedChanges = true;
           });
+          
           await _saveSchedule();
           _showSuccess("Schedule Updated!");
         } else {
@@ -229,10 +257,18 @@ class _RosterScreenState extends State<RosterScreen> {
       }
 
       setState(() {
-        _weeklySchedule.addAll(newEvents);
+        if (_weeklySchedule.isEmpty) _weeklySchedule = _normalizeWeek({});
+        
+        newEvents.forEach((key, events) {
+            if (_weeklySchedule[key] == null) _weeklySchedule[key] = [];
+            _weeklySchedule[key]!.addAll(events);
+        });
+        
         _selectedMode = 0; 
+        _hasUnsavedChanges = true;
       });
       await _saveSchedule(); 
+      _showSuccess("Imported ${eventsResult.data!.length} events");
       
     } else {
       _showError("No upcoming events found.");
@@ -251,14 +287,13 @@ class _RosterScreenState extends State<RosterScreen> {
   void _deleteEvent(String day, int index) {
     setState(() {
       _weeklySchedule[day]?.removeAt(index);
-      if (_weeklySchedule[day]!.isEmpty) _weeklySchedule.remove(day);
       _hasUnsavedChanges = true;
     });
   }
 
   void _clearAll() async {
     setState(() {
-      _weeklySchedule = {};
+      _weeklySchedule = _normalizeWeek({});
       _hasUnsavedChanges = false;
     });
     final prefs = await SharedPreferences.getInstance();
@@ -280,7 +315,10 @@ class _RosterScreenState extends State<RosterScreen> {
   @override
   Widget build(BuildContext context) {
     final daysOrder = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-    final sortedKeys = _weeklySchedule.keys.toList()
+    
+    final keys = _weeklySchedule.keys.toList();
+    
+    final sortedKeys = keys
       ..sort((a, b) => daysOrder.indexOf(a).compareTo(daysOrder.indexOf(b)));
 
     return Scaffold(
@@ -304,7 +342,6 @@ class _RosterScreenState extends State<RosterScreen> {
       
       body: Column(
         children: [
-          // MODE TOGGLE
           Container(
             padding: const EdgeInsets.symmetric(vertical: 10),
             color: Colors.grey.shade900,
@@ -318,7 +355,6 @@ class _RosterScreenState extends State<RosterScreen> {
             ),
           ),
 
-          // INPUT AREA
           AnimatedContainer(
             duration: const Duration(milliseconds: 300),
             color: Colors.grey.shade900,
@@ -341,7 +377,6 @@ class _RosterScreenState extends State<RosterScreen> {
 
           const Divider(height: 1, color: Colors.grey),
 
-          // SCHEDULE LIST
           Expanded(
             child: _weeklySchedule.isEmpty 
               ? const Center(child: Text("Schedule Empty", style: TextStyle(color: Colors.grey)))
@@ -350,37 +385,40 @@ class _RosterScreenState extends State<RosterScreen> {
                   itemCount: sortedKeys.length,
                   itemBuilder: (context, index) {
                     String day = sortedKeys[index];
-                    List events = _weeklySchedule[day]!;
+                    List events = _weeklySchedule[day] ?? [];
+                    
                     return Card(
                       color: Colors.grey.shade800,
                       margin: const EdgeInsets.only(bottom: 10, left: 10, right: 10, top: 5),
                       child: ExpansionTile(
-                        initiallyExpanded: true,
+                        initiallyExpanded: events.isNotEmpty, 
                         title: Text(day, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                        children: events.asMap().entries.map((entry) {
-                          int idx = entry.key;
-                          Map e = entry.value;
-                          return ListTile(
-                            contentPadding: const EdgeInsets.symmetric(horizontal: 10),
-                            leading: const Icon(Icons.event_note, color: Colors.tealAccent, size: 20),
-                            title: TextFormField(
-                              initialValue: e['event'],
-                              style: const TextStyle(color: Colors.white),
-                              decoration: const InputDecoration(border: InputBorder.none, hintText: "Event Name"),
-                              onChanged: (val) => _editEvent(day, idx, 'event', val),
-                            ),
-                            subtitle: TextFormField(
-                              initialValue: e['time'],
-                              style: const TextStyle(color: Colors.white54),
-                              decoration: const InputDecoration(border: InputBorder.none, hintText: "Time"),
-                              onChanged: (val) => _editEvent(day, idx, 'time', val),
-                            ),
-                            trailing: IconButton(
-                              icon: const Icon(Icons.close, color: Colors.redAccent, size: 18),
-                              onPressed: () => _deleteEvent(day, idx),
-                            ),
-                          );
-                        }).toList(),
+                        children: events.isEmpty 
+                            ? [const Padding(padding: EdgeInsets.all(16.0), child: Text("No classes scheduled", style: TextStyle(color: Colors.white38)))]
+                            : events.asMap().entries.map((entry) {
+                                int idx = entry.key;
+                                Map e = entry.value;
+                                return ListTile(
+                                  contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+                                  leading: const Icon(Icons.event_note, color: Colors.tealAccent, size: 20),
+                                  title: TextFormField(
+                                    initialValue: e['event'],
+                                    style: const TextStyle(color: Colors.white),
+                                    decoration: const InputDecoration(border: InputBorder.none, hintText: "Event Name"),
+                                    onChanged: (val) => _editEvent(day, idx, 'event', val),
+                                  ),
+                                  subtitle: TextFormField(
+                                    initialValue: e['time'],
+                                    style: const TextStyle(color: Colors.white54),
+                                    decoration: const InputDecoration(border: InputBorder.none, hintText: "Time"),
+                                    onChanged: (val) => _editEvent(day, idx, 'time', val),
+                                  ),
+                                  trailing: IconButton(
+                                    icon: const Icon(Icons.close, color: Colors.redAccent, size: 18),
+                                    onPressed: () => _deleteEvent(day, idx),
+                                  ),
+                                );
+                              }).toList(),
                       ),
                     );
                   },
@@ -426,7 +464,7 @@ class _RosterScreenState extends State<RosterScreen> {
               Expanded(
                 flex: 2,
                 child: DropdownButtonFormField<String>(
-                  initialValue: _dayController.text,
+                  value: _dayController.text.isNotEmpty ? _dayController.text : "Monday", 
                   dropdownColor: Colors.grey.shade800,
                   items: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
                       .map((d) => DropdownMenuItem(value: d, child: Text(d, style: const TextStyle(color: Colors.white)))).toList(),
