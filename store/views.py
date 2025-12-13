@@ -68,7 +68,7 @@ def encode_image(image_file):
 @authentication_classes([])
 @permission_classes([])
 def ai_status_check(request):
-    """Checks OpenRouter status with UPDATED model IDs."""
+    """Checks OpenRouter status with CORRECTED Model IDs."""
     results = {}
     
     if not OPENROUTER_API_KEY:
@@ -79,26 +79,27 @@ def ai_status_check(request):
         api_key=OPENROUTER_API_KEY,
     )
 
-    # UPDATED LIST OF FREE MODELS (Corrected IDs)
+    # UPDATED LIST OF VERIFIED FREE MODELS
     models_to_test = [
-        "google/gemini-2.0-flash-exp:free",      # Fast, sometimes busy
-        "google/gemini-2.0-pro-exp-02-05:free",  # New Pro experimental
-        "qwen/qwen-2.5-vl-72b-instruct:free",    # Replaces qwen-2-vl (Fixed 404)
-        "meta-llama/llama-3.2-11b-vision-instruct:free", # Keep as backup
+        "google/gemini-2.0-flash-exp:free",      # CONFIRMED WORKING
+        "qwen/qwen2.5-vl-72b-instruct:free",     # FIXED TYPO (qwen2.5 vs qwen-2.5)
+        "google/gemini-2.0-pro-exp-02-05:free",  # Backup Google model
+        "microsoft/phi-3-medium-128k-instruct:free" # Backup Text model
     ]
 
     for model in models_to_test:
         try:
+            # Simple text check
             client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": "Hi"}],
             )
             results[model] = "SUCCESS"
         except Exception as e:
-            # Shorten error message for readability
+            # Shorten error message
             error_msg = str(e)
             if "429" in error_msg: results[model] = "BUSY (Rate Limit)"
-            elif "404" in error_msg: results[model] = "OFFLINE (404)"
+            elif "404" in error_msg: results[model] = "OFFLINE (Model ID Changed)"
             else: results[model] = f"FAILED: {error_msg[:100]}..."
 
     return Response({"OpenRouter Status": results})
@@ -131,7 +132,7 @@ def ask_nutritionist(request):
     
     try:
         client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
-        # Use a solid text model for Q&A
+        # Use the confirmed working model
         response = client.chat.completions.create(
             model="google/gemini-2.0-flash-exp:free", 
             messages=[{"role": "user", "content": f"You are a nutritionist. Answer briefly: {user_question}"}]
@@ -158,11 +159,10 @@ class ScanFoodView(APIView):
         { "food_name": "...", "estimated_calories": 0, "protein": 0.0, "carbs": 0.0, "fat": 0.0 }
         """
         
-        # Priority list for Vision (Updated)
+        # Priority list (Gemini First because it SUCCESS)
         models = [
             "google/gemini-2.0-flash-exp:free", 
-            "qwen/qwen-2.5-vl-72b-instruct:free", #
-            "google/gemini-2.0-pro-exp-02-05:free"
+            "qwen/qwen2.5-vl-72b-instruct:free", # Fixed ID
         ]
 
         for model in models:
@@ -180,12 +180,12 @@ class ScanFoodView(APIView):
                 )
                 return Response({"message": "Success", "saved_data": {"name": new_food.name, "calories": new_food.calories}})
             except Exception:
-                continue # Try next model if this one fails
+                continue 
 
         return Response({"error": "All vision models failed. Please try again later."}, status=500)
 
 # ==========================================
-# 4. ROSTER ANALYZER (UPDATED MODEL LIST)
+# 4. ROSTER ANALYZER (CORRECTED IDs)
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):
@@ -216,16 +216,14 @@ class AnalyzeRosterView(APIView):
         analysis_data = None
         source_name = "None"
         
-        # --- UPDATED PRIORITY LIST ---
-        # 1. Gemini 2.0 Flash (Best Free Vision)
-        # 2. Qwen 2.5 VL (Newest Open Source Vision) -
-        # 3. Gemini 2.0 Pro (New, powerful, free)
-        # 4. Llama 3.2 11B (Backup)
+        # --- CORRECTED PRIORITY LIST ---
+        # 1. Gemini 2.0 Flash (Your logs confirmed this works!)
+        # 2. Qwen 2.5 VL (Corrected ID: qwen2.5 not qwen-2.5)
+        # 3. Gemini 2.0 Pro (Backup)
         models_to_try = [
             "google/gemini-2.0-flash-exp:free",
-            "qwen/qwen-2.5-vl-72b-instruct:free",
-            "google/gemini-2.0-pro-exp-02-05:free",
-            "meta-llama/llama-3.2-11b-vision-instruct:free"
+            "qwen/qwen2.5-vl-72b-instruct:free", #
+            "google/gemini-2.0-pro-exp-02-05:free"
         ]
 
         for model in models_to_try:
