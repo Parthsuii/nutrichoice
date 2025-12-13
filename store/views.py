@@ -43,7 +43,6 @@ def safe_json_extract(text):
     except Exception:
         pass
     try:
-        # Fallback: remove code blocks
         clean = text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except:
@@ -55,7 +54,7 @@ def safe_json_extract(text):
 def scan_with_openrouter(prompt, base64_img):
     if not OPENROUTER_KEY: return None, None
     
-    # Priority List - Verified Free Models
+    # Priority List
     models = [
         "google/gemini-2.0-flash-exp:free",      
         "qwen/qwen-2.5-vl-72b-instruct:free",    
@@ -88,13 +87,13 @@ def scan_with_openrouter(prompt, base64_img):
     return None, None
 
 # =========================================================================
-# LAYER 2: HUGGING FACE CHAT (With Retry Logic)
+# LAYER 2: HUGGING FACE CHAT (Qwen 2-VL)
 # =========================================================================
 def scan_with_hf_chat(prompt, base64_img):
     if not HF_KEY: return None, None
     
-    # Qwen 2.5 VL 7B - Best Free HF Model
-    model_id = "Qwen/Qwen2.5-VL-7B-Instruct"
+    # Use Qwen2-VL (older stable version) to fix 404 errors
+    model_id = "Qwen/Qwen2-VL-7B-Instruct"
     client = InferenceClient(api_key=HF_KEY)
 
     for attempt in range(2): 
@@ -156,7 +155,7 @@ def scan_with_specialized_vision(prompt, base64_img):
     return None, None
 
 # ==========================================
-# 1. DIAGNOSTIC ENDPOINT (FIXED & RELIABLE)
+# 1. DIAGNOSTIC ENDPOINT (SMARTER)
 # ==========================================
 @csrf_exempt 
 @api_view(['GET'])
@@ -183,19 +182,17 @@ def ai_status_check(request):
                 results["OpenRouter"] = f"Warning: {str(e)[:50]}"
     else: results["OpenRouter"] = "MISSING KEY"
 
-    # HF Check (Using Flan-T5 - The Gold Standard for Uptime)
+    # HF Check (Using Zephyr - Standard Free Chat Model)
     if HF_KEY:
         try:
             client = InferenceClient(api_key=HF_KEY)
-            # Use text_generation on a small model that is always cached
-            client.text_generation(
-                model="google/flan-t5-small", 
-                prompt="Hello", 
-                max_new_tokens=5
+            client.chat_completion(
+                model="HuggingFaceH4/zephyr-7b-beta", 
+                messages=[{"role": "user", "content": "Hi"}], 
+                max_tokens=5
             )
             results["HuggingFace"] = "SUCCESS"
-        except Exception as e: 
-            results["HuggingFace"] = f"FAILED: {str(e)[:50]}"
+        except Exception as e: results["HuggingFace"] = f"FAILED: {str(e)[:50]}"
     else: results["HuggingFace"] = "MISSING KEY"
 
     return Response(results)
