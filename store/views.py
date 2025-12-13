@@ -11,25 +11,53 @@ from django.contrib.auth.models import User
 import os
 import base64
 import json
+from openai import OpenAI  # Standard client for OpenRouter
 
 # --- IMPORTS FROM YOUR APP ---
-from .models import FoodItem, UserProfile 
+from .models import FoodItem, UserProfile
 from .serializers import FoodItemSerializer, UserProfileSerializer, FoodImageSerializer
 
-# --- AI LIBRARIES ---
-import google.generativeai as genai
-from mistralai import Mistral
-from groq import Groq
-from huggingface_hub import InferenceClient
-
 # --- CONFIGURATION ---
-GOOGLE_KEY = os.environ.get("GOOGLE_API_KEY")
-MISTRAL_KEY = os.environ.get("MISTRAL_API_KEY")
-GROQ_KEY = os.environ.get("GROQ_API_KEY")
-HF_KEY = os.environ.get("HUGGINGFACE_API_KEY")
+# We now primarily rely on OpenRouter for everything!
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+SITE_URL = "https://nutrichoice.onrender.com"  # Optional, for OpenRouter rankings
+APP_NAME = "NutriChoice"
 
-if GOOGLE_KEY:
-    genai.configure(api_key=GOOGLE_KEY)
+# --- HELPER: Call OpenRouter ---
+def call_openrouter_vision(model_name, prompt, base64_image):
+    """
+    Generic helper to call ANY vision model via OpenRouter.
+    """
+    if not OPENROUTER_API_KEY:
+        raise Exception("OpenRouter API Key missing.")
+
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+    )
+
+    completion = client.chat.completions.create(
+        extra_headers={
+            "HTTP-Referer": SITE_URL,
+            "X-Title": APP_NAME,
+        },
+        model=model_name,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_image}"
+                        },
+                    },
+                ],
+            }
+        ],
+    )
+    return completion.choices[0].message.content
 
 # --- HELPER: Convert Image to Base64 ---
 def encode_image(image_file):
@@ -39,55 +67,41 @@ def encode_image(image_file):
 # ==========================================
 # 0. AI STATUS CHECK (DIAGNOSTIC)
 # ==========================================
-@csrf_exempt 
+@csrf_exempt
 @api_view(['GET'])
 @authentication_classes([])
 @permission_classes([])
 def ai_status_check(request):
-    """Checks ALL 4 AI keys with lightweight models."""
+    """Checks if OpenRouter is working with free models."""
     results = {}
 
-    # 1. GROQ (Llama 3.2 Vision)
-    if not GROQ_KEY: results['Groq'] = "FAILED: Key missing."
-    else:
+    if not OPENROUTER_API_KEY:
+        return Response({"Status": "FAILED: OPENROUTER_API_KEY is missing in Render Environment."})
+
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+    )
+
+    # List of FREE models to test
+    models_to_test = [
+        "google/gemini-2.0-flash-exp:free",
+        "meta-llama/llama-3.2-11b-vision-instruct:free",
+        "mistralai/pixtral-12b:free",
+        "qwen/qwen-2-vl-7b-instruct:free"
+    ]
+
+    for model in models_to_test:
         try:
-            client = Groq(api_key=GROQ_KEY)
             client.chat.completions.create(
-                model="llama-3.2-11b-vision-preview", 
-                messages=[{"role": "user", "content": "Hi"}]
+                model=model,
+                messages=[{"role": "user", "content": "Hi"}],
             )
-            results['Groq'] = "SUCCESS"
-        except Exception as e: results['Groq'] = f"FAILED: {str(e)}"
+            results[model] = "SUCCESS"
+        except Exception as e:
+            results[model] = f"FAILED: {str(e)}"
 
-    # 2. MISTRAL (Updated to 'open-mistral-nemo' as 'tiny' is deprecated)
-    if not MISTRAL_KEY: results['Mistral'] = "FAILED: Key missing."
-    else:
-        try:
-            client = Mistral(api_key=MISTRAL_KEY)
-            client.chat.complete(model="open-mistral-nemo", messages=[{"role": "user", "content": "Hi"}])
-            results['Mistral'] = "SUCCESS"
-        except Exception as e: results['Mistral'] = f"FAILED: {str(e)}"
-
-    # 3. GEMINI (1.5 Flash)
-    if not GOOGLE_KEY: results['Gemini'] = "FAILED: Key missing."
-    else:
-        try:
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            model.generate_content("Hi")
-            results['Gemini'] = "SUCCESS"
-        except Exception as e: results['Gemini'] = f"FAILED: {str(e)}"
-
-    # 4. HUGGING FACE (Qwen2.5-7B - Faster than 72B)
-    if not HF_KEY: results['HuggingFace'] = "FAILED: Key missing."
-    else:
-        try:
-            client = InferenceClient(api_key=HF_KEY)
-            # Using 7B model for faster/cheaper status check
-            client.text_generation(model="Qwen/Qwen2.5-7B-Instruct", prompt="Hi", max_new_tokens=5)
-            results['HuggingFace'] = "SUCCESS"
-        except Exception as e: results['HuggingFace'] = f"FAILED: {str(e)}"
-
-    return Response({"AI Status": results})
+    return Response({"OpenRouter Status": results})
 
 # ==========================================
 # 1. STANDARD CRUD VIEWS
@@ -95,7 +109,7 @@ def ai_status_check(request):
 class FoodItemList(ListCreateAPIView):
     queryset = FoodItem.objects.all()
     serializer_class = FoodItemSerializer
-    authentication_classes = [] 
+    authentication_classes = []
     permission_classes = []
 
 class FoodItemDetail(RetrieveUpdateDestroyAPIView):
@@ -114,10 +128,15 @@ class FoodItemDetail(RetrieveUpdateDestroyAPIView):
 def ask_nutritionist(request):
     user_question = request.data.get('question')
     if not user_question: return Response({"error": "No question"}, status=400)
+
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(f"Answer briefly: {user_question}")
-        return Response({"answer": response.text, "source": "Gemini"})
+        # Using OpenRouter for text
+        client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
+        response = client.chat.completions.create(
+            model="google/gemini-2.0-flash-exp:free",  # Free & Fast
+            messages=[{"role": "user", "content": f"You are a nutritionist. Answer briefly: {user_question}"}]
+        )
+        return Response({"answer": response.choices[0].message.content, "source": "OpenRouter Gemini"})
     except Exception as e: return Response({"error": str(e)}, status=500)
 
 # ==========================================
@@ -126,22 +145,25 @@ def ask_nutritionist(request):
 @method_decorator(csrf_exempt, name='dispatch')
 class ScanFoodView(APIView):
     parser_classes = (MultiPartParser, FormParser)
-    authentication_classes = [] 
+    authentication_classes = []
     permission_classes = []
 
     def post(self, request, *args, **kwargs):
         if 'image' not in request.FILES: return Response({"error": "No image"}, status=400)
         image_file = request.FILES['image']
+        base64_img = encode_image(image_file)
+
         prompt = """
         Identify food. Estimate calories/macros. Return strictly valid JSON:
         { "food_name": "...", "estimated_calories": 0, "protein": 0.0, "carbs": 0.0, "fat": 0.0 }
         """
         try:
-            pil_image = Image.open(image_file)
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            response = model.generate_content([prompt, pil_image])
-            clean = response.text.strip().replace("```json", "").replace("```", "").strip()
+            # Using OpenRouter Vision
+            response_text = call_openrouter_vision("google/gemini-2.0-flash-exp:free", prompt, base64_img)
+
+            clean = response_text.strip().replace("```json", "").replace("```", "").strip()
             data = json.loads(clean)
+
             new_food = FoodItem.objects.create(
                 name=data.get('food_name', 'Unknown'),
                 calories=int(data.get('estimated_calories', 0)),
@@ -153,9 +175,9 @@ class ScanFoodView(APIView):
         except Exception as e: return Response({"error": str(e)}, status=500)
 
 # ==========================================
-# 4. ROSTER ANALYZER (UNBREAKABLE WATERFALL)
+# 4. ROSTER ANALYZER (OPENROUTER FREE CASCADE)
 # ==========================================
-@method_decorator(csrf_exempt, name='dispatch') 
+@method_decorator(csrf_exempt, name='dispatch')
 class AnalyzeRosterView(APIView):
     parser_classes = (MultiPartParser, FormParser)
     authentication_classes = []
@@ -166,7 +188,8 @@ class AnalyzeRosterView(APIView):
             return Response({"error": "No file provided."}, status=400)
 
         image_file = request.FILES['file']
-        
+        base64_img = encode_image(image_file)
+
         prompt_text = """
         STRICT INSTRUCTION: Act as a structured data extraction API.
         Analyze this timetable. Extract the weekly schedule.
@@ -182,114 +205,50 @@ class AnalyzeRosterView(APIView):
 
         analysis_data = None
         source_name = "None"
-        
-        # --- ATTEMPT 1: GROQ VISION (Fastest & Free) ---
-        if GROQ_KEY:
-            try:
-                print("Trying Groq Llama 3.2 Vision...")
-                image_file.seek(0)
-                base64_img = encode_image(image_file)
-                client = Groq(api_key=GROQ_KEY)
-                resp = client.chat.completions.create(
-                    model="llama-3.2-11b-vision-preview",
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt_text},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-                        ]
-                    }]
-                )
-                if resp.choices[0].message.content:
-                    analysis_data = resp.choices[0].message.content
-                    source_name = "Groq Llama Vision"
-            except Exception as e: print(f"Groq Vision Failed: {e}")
 
-        # --- ATTEMPT 2: MISTRAL (Proven Backup) ---
-        if not analysis_data and MISTRAL_KEY:
-            try:
-                print("Trying Mistral Pixtral...")
-                image_file.seek(0)
-                base64_img = encode_image(image_file)
-                client = Mistral(api_key=MISTRAL_KEY)
-                resp = client.chat.complete(
-                    model="pixtral-12b-2409",
-                    messages=[{
-                        "role": "user", 
-                        "content": [{"type": "text", "text": prompt_text}, {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_img}"}]
-                    }]
-                )
-                if resp.choices[0].message.content:
-                    analysis_data = resp.choices[0].message.content
-                    source_name = "Mistral"
-            except Exception as e: print(f"Mistral Failed: {e}")
+        # LIST OF FREE VISION MODELS ON OPENROUTER (Priority Order)
+        # 1. Gemini 2.0 Flash (Best quality, Free)
+        # 2. Llama 3.2 11B Vision (Fastest, Free)
+        # 3. Pixtral 12B (Reliable, Free)
+        # 4. Qwen 2 VL (Open Source Standard, Free)
+        models_to_try = [
+            "google/gemini-2.0-flash-exp:free",
+            "meta-llama/llama-3.2-11b-vision-instruct:free",
+            "mistralai/pixtral-12b:free",
+            "qwen/qwen-2-vl-7b-instruct:free"
+        ]
 
-        # --- ATTEMPT 3: HUGGING FACE (Qwen2-VL - High Accuracy) ---
-        if not analysis_data and HF_KEY:
-            try:
-                print("Trying Hugging Face Qwen2-VL...")
-                image_file.seek(0)
-                base64_img = encode_image(image_file)
-                client = InferenceClient(api_key=HF_KEY)
-                
-                # Using Qwen2-VL-7B-Instruct (Vision Model)
-                resp = client.chat_completion(
-                    model="Qwen/Qwen2-VL-7B-Instruct", 
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt_text},
-                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-                            ]
-                        }
-                    ], 
-                    max_tokens=1000
-                )
-                
-                if resp.choices[0].message.content:
-                    analysis_data = resp.choices[0].message.content
-                    source_name = "HuggingFace Qwen"
-            except Exception as e: print(f"HuggingFace Failed: {e}")
+        for model in models_to_try:
+            if analysis_data: break  # Stop if we have data
 
-        # --- ATTEMPT 4: GEMINI (Stable Backup) ---
-        if not analysis_data and GOOGLE_KEY:
             try:
-                print("Trying Gemini 1.5 Flash...")
-                image_file.seek(0)
-                pil_img = Image.open(image_file)
-                model = genai.GenerativeModel('gemini-1.5-flash')
-                resp = model.generate_content([prompt_text, pil_img])
-                if resp.text:
-                    analysis_data = resp.text
-                    source_name = "Gemini"
-            except Exception as e: print(f"Gemini Failed: {e}")
+                print(f"Attempting Roster Scan with {model} via OpenRouter...")
+                response_text = call_openrouter_vision(model, prompt_text, base64_img)
+
+                if response_text:
+                    analysis_data = response_text
+                    source_name = f"OpenRouter {model}"
+            except Exception as e:
+                print(f"Failed with {model}: {e}")
 
         # --- FINAL PROCESSING ---
         if analysis_data:
             try:
                 clean = analysis_data.strip().replace("```json", "").replace("```", "").strip()
                 data = json.loads(clean)
-                
+
                 if 'weekly_schedule' not in data:
-                    # Robust Fix: If AI returned raw schedule but missing root key, wrap it
                     if isinstance(data, dict):
-                        # Simple heuristic: check if common days are present as keys
-                        days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
-                        if any(day in data for day in days):
-                             data = {"weekly_schedule": data}
-                        elif "schedule" in data:
-                             data = {"weekly_schedule": data["schedule"]}
-                        else:
-                             # If structure is totally wrong, raise error to trigger fallback
-                             raise ValueError("Invalid JSON structure")
-                
+                        data = {"weekly_schedule": data}
+                    else:
+                        raise ValueError("Invalid JSON")
+
                 data['ai_source'] = source_name
                 return Response(data)
             except Exception as e:
                 return Response({"error": f"JSON Error ({source_name}): {str(e)}", "raw": analysis_data}, status=500)
-        
-        return Response({"error": "All 4 AI models failed."}, status=500)
+
+        return Response({"error": "All OpenRouter free models failed to scan the image."}, status=500)
 
 # ==========================================
 # 5. MEAL PLANNING
@@ -301,7 +260,7 @@ class AnalyzeRosterView(APIView):
 def user_profile_view(request):
     if not User.objects.exists():
         try: User.objects.create_superuser('admin', 'admin@example.com', 'admin123')
-        except: pass 
+        except: pass
     user = User.objects.first()
     profile, _ = UserProfile.objects.get_or_create(user=user)
     if request.method == 'GET': return Response(UserProfileSerializer(profile).data)
@@ -318,8 +277,7 @@ def user_profile_view(request):
 @permission_classes([])
 def generate_meal_plan(request):
     try:
-        # Placeholder for brevity
-        return Response({"meals": []}) 
+        return Response({"meals": []})
     except: return Response({"error": "Error"}, status=500)
 
 @csrf_exempt
