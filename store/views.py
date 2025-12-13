@@ -68,38 +68,31 @@ def scan_with_openrouter(prompt, base64_img):
 def scan_with_huggingface(prompt, base64_img):
     if not HF_KEY: return None, None
     
-    # Qwen2.5-VL is the current SOTA for Open Source OCR
-    # We try the big 72B model first for accuracy, then 7B for speed
-    hf_models = [
-        "Qwen/Qwen2.5-VL-72B-Instruct", 
-        "Qwen/Qwen2.5-VL-7B-Instruct"
-    ]
+    # Switch to 7B model (Likely to be available/free) instead of 72B
+    model_id = "Qwen/Qwen2.5-VL-7B-Instruct"
     
     client = InferenceClient(api_key=HF_KEY)
 
-    for model_id in hf_models:
-        try:
-            print(f"Switching to Hugging Face: {model_id}...")
-            messages = [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-                ]
-            }]
-            
-            # Use chat_completion which handles vision correctly
-            completion = client.chat_completion(
-                model=model_id,
-                messages=messages,
-                max_tokens=1000
-            )
-            return completion.choices[0].message.content, f"HuggingFace {model_id}"
-        except Exception as e:
-            print(f"Hugging Face {model_id} failed: {e}")
-            continue
-
-    return None, None
+    try:
+        print(f"Switching to Hugging Face: {model_id}...")
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
+            ]
+        }]
+        
+        # Use chat_completion which handles vision correctly
+        completion = client.chat_completion(
+            model=model_id,
+            messages=messages,
+            max_tokens=1000
+        )
+        return completion.choices[0].message.content, f"HuggingFace {model_id}"
+    except Exception as e:
+        print(f"Hugging Face {model_id} failed: {e}")
+        return None, None
 
 # ==========================================
 # 1. DIAGNOSTIC ENDPOINT
@@ -124,12 +117,11 @@ def ai_status_check(request):
         except Exception as e: results["OpenRouter"] = f"FAILED: {str(e)[:50]}"
     else: results["OpenRouter"] = "MISSING KEY"
 
-    # Check Hugging Face
+    # Check Hugging Face (Updated to 'gpt2' which is always online)
     if HF_KEY:
         try:
             client = InferenceClient(api_key=HF_KEY)
-            # Use a tiny text model just to check if the key works
-            client.text_generation(model="google/flan-t5-small", prompt="Hi")
+            client.text_generation(model="gpt2", prompt="Hi", max_new_tokens=5)
             results["HuggingFace"] = "SUCCESS"
         except Exception as e: results["HuggingFace"] = f"FAILED: {str(e)[:50]}"
     else: results["HuggingFace"] = "MISSING KEY"
