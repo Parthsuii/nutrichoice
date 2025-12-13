@@ -3,109 +3,184 @@ from rest_framework.response import Response
 from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework import serializers
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
-from PIL import Image
 from django.contrib.auth.models import User
 import os
 import base64
 import json
-from openai import OpenAI
+
+# --- HYBRID LIBRARIES ---
+from openai import OpenAI  # For OpenRouter
+from huggingface_hub import InferenceClient  # For Hugging Face
 
 # --- IMPORTS FROM YOUR APP ---
 from .models import FoodItem, UserProfile 
-from .serializers import FoodItemSerializer, UserProfileSerializer, FoodImageSerializer
+from .serializers import FoodItemSerializer, UserProfileSerializer
 
 # --- CONFIGURATION ---
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")
+HF_KEY = os.environ.get("HUGGINGFACE_API_KEY")
 SITE_URL = "https://nutrichoice.onrender.com"
 APP_NAME = "NutriChoice"
 
-# --- HELPER: Call OpenRouter ---
-def call_openrouter_vision(model_name, prompt, base64_image):
-    if not OPENROUTER_API_KEY:
-        raise Exception("OpenRouter API Key missing.")
-
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
-    )
-
-    completion = client.chat.completions.create(
-        extra_headers={
-            "HTTP-Referer": SITE_URL,
-            "X-Title": APP_NAME,
-        },
-        model=model_name,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}"
-                        },
-                    },
-                ],
-            }
-        ],
-    )
-    return completion.choices[0].message.content
-
-# --- HELPER: Convert Image to Base64 ---
+# --- HELPER: Encode Image ---
 def encode_image(image_file):
     image_file.seek(0)
     return base64.b64encode(image_file.read()).decode('utf-8')
 
+# --- STRATEGY 1: OPENROUTER (Gemini Team) ---
+def scan_with_openrouter(prompt, base64_img):
+    if not OPENROUTER_KEY: return None, None
+    
+    # Priority List: 
+    # 1. Gemini 2.0 Flash (Newest/Best Free)
+    # 2. Gemini 1.5 Flash (Most Reliable Free)
+    models = [
+        "google/gemini-2.0-flash-exp:free", 
+        "google/gemini-1.5-flash:free"
+    ]
+
+    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
+
+    for model in models:
+        try:
+            print(f"Trying OpenRouter: {model}...")
+            completion = client.chat.completions.create(
+                extra_headers={"HTTP-Referer": SITE_URL, "X-Title": APP_NAME},
+                model=model,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
+                    ]
+                }]
+            )
+            return completion.choices[0].message.content, f"OpenRouter {model}"
+        except Exception as e:
+            print(f"OpenRouter {model} failed: {e}")
+            continue # Try the next model
+            
+    return None, None
+
+# --- STRATEGY 2: HUGGING FACE (Qwen Team) ---
+def scan_with_huggingface(prompt, base64_img):
+    if not HF_KEY: return None, None
+    
+    # Qwen2.5-VL is the current SOTA for Open Source OCR
+    # We try the big 72B model first for accuracy, then 7B for speed
+    hf_models = [
+        "Qwen/Qwen2.5-VL-72B-Instruct", 
+        "Qwen/Qwen2.5-VL-7B-Instruct"
+    ]
+    
+    client = InferenceClient(api_key=HF_KEY)
+
+    for model_id in hf_models:
+        try:
+            print(f"Switching to Hugging Face: {model_id}...")
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
+                ]
+            }]
+            
+            # Use chat_completion which handles vision correctly
+            completion = client.chat_completion(
+                model=model_id,
+                messages=messages,
+                max_tokens=1000
+            )
+            return completion.choices[0].message.content, f"HuggingFace {model_id}"
+        except Exception as e:
+            print(f"Hugging Face {model_id} failed: {e}")
+            continue
+
+    return None, None
+
 # ==========================================
-# 0. AI STATUS CHECK (DIAGNOSTIC)
+# 1. DIAGNOSTIC ENDPOINT
 # ==========================================
 @csrf_exempt 
 @api_view(['GET'])
 @authentication_classes([])
 @permission_classes([])
 def ai_status_check(request):
-    """Checks OpenRouter status with CORRECTED Model IDs."""
+    """Checks if keys are valid for both platforms."""
     results = {}
     
-    if not OPENROUTER_API_KEY:
-        return Response({"Status": "FAILED: OPENROUTER_API_KEY is missing."})
-
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
-    )
-
-    # UPDATED LIST OF VERIFIED FREE MODELS
-    models_to_test = [
-        "google/gemini-2.0-flash-exp:free",      # CONFIRMED WORKING
-        "qwen/qwen2.5-vl-72b-instruct:free",     # FIXED TYPO (qwen2.5 vs qwen-2.5)
-        "google/gemini-2.0-pro-exp-02-05:free",  # Backup Google model
-        "microsoft/phi-3-medium-128k-instruct:free" # Backup Text model
-    ]
-
-    for model in models_to_test:
+    # Check OpenRouter
+    if OPENROUTER_KEY:
         try:
-            # Simple text check
+            client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
             client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": "Hi"}],
+                model="google/gemini-2.0-flash-exp:free",
+                messages=[{"role": "user", "content": "Hi"}]
             )
-            results[model] = "SUCCESS"
-        except Exception as e:
-            # Shorten error message
-            error_msg = str(e)
-            if "429" in error_msg: results[model] = "BUSY (Rate Limit)"
-            elif "404" in error_msg: results[model] = "OFFLINE (Model ID Changed)"
-            else: results[model] = f"FAILED: {error_msg[:100]}..."
+            results["OpenRouter"] = "SUCCESS"
+        except Exception as e: results["OpenRouter"] = f"FAILED: {str(e)[:50]}"
+    else: results["OpenRouter"] = "MISSING KEY"
 
-    return Response({"OpenRouter Status": results})
+    # Check Hugging Face
+    if HF_KEY:
+        try:
+            client = InferenceClient(api_key=HF_KEY)
+            # Use a tiny text model just to check if the key works
+            client.text_generation(model="google/flan-t5-small", prompt="Hi")
+            results["HuggingFace"] = "SUCCESS"
+        except Exception as e: results["HuggingFace"] = f"FAILED: {str(e)[:50]}"
+    else: results["HuggingFace"] = "MISSING KEY"
+
+    return Response(results)
 
 # ==========================================
-# 1. STANDARD CRUD VIEWS
+# 2. HYBRID ROSTER SCANNER
+# ==========================================
+@method_decorator(csrf_exempt, name='dispatch') 
+class AnalyzeRosterView(APIView):
+    parser_classes = (MultiPartParser, FormParser)
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request, *args, **kwargs):
+        if 'file' not in request.FILES: return Response({"error": "No file"}, status=400)
+        image_file = request.FILES['file']
+        base64_img = encode_image(image_file)
+        
+        prompt = """
+        Extract the weekly schedule from this timetable image.
+        Return ONLY valid JSON.
+        Format: { "weekly_schedule": { "Monday": [{"time": "...", "event": "..."}] } }
+        """
+
+        # 1. Try OpenRouter (Gemini)
+        data, source = scan_with_openrouter(prompt, base64_img)
+        
+        # 2. If Failed, Try Hugging Face (Qwen)
+        if not data:
+            data, source = scan_with_huggingface(prompt, base64_img)
+
+        # 3. Process Result
+        if data:
+            try:
+                clean = data.strip().replace("```json", "").replace("```", "").strip()
+                json_data = json.loads(clean)
+                if 'weekly_schedule' not in json_data:
+                    if isinstance(json_data, dict): json_data = {"weekly_schedule": json_data}
+                    else: raise ValueError("Invalid JSON")
+                
+                json_data['ai_source'] = source
+                return Response(json_data)
+            except Exception as e:
+                return Response({"error": "JSON Parse Error", "raw": data}, status=500)
+
+        return Response({"error": "Both OpenRouter and Hugging Face failed."}, status=500)
+
+# ==========================================
+# 3. STANDARD VIEWS
 # ==========================================
 class FoodItemList(ListCreateAPIView):
     queryset = FoodItem.objects.all()
@@ -119,146 +194,51 @@ class FoodItemDetail(RetrieveUpdateDestroyAPIView):
     authentication_classes = []
     permission_classes = []
 
-# ==========================================
-# 2. ASK NUTRITIONIST
-# ==========================================
 @csrf_exempt
 @api_view(['POST'])
-@authentication_classes([])
-@permission_classes([])
 def ask_nutritionist(request):
-    user_question = request.data.get('question')
-    if not user_question: return Response({"error": "No question"}, status=400)
-    
+    q = request.data.get('question')
+    if not q: return Response({"error": "No question"}, 400)
     try:
-        client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
-        # Use the confirmed working model
-        response = client.chat.completions.create(
-            model="google/gemini-2.0-flash-exp:free", 
-            messages=[{"role": "user", "content": f"You are a nutritionist. Answer briefly: {user_question}"}]
+        # OpenRouter Text Model
+        client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
+        resp = client.chat.completions.create(
+            model="google/gemini-2.0-flash-exp:free",
+            messages=[{"role": "user", "content": q}]
         )
-        return Response({"answer": response.choices[0].message.content, "source": "OpenRouter"})
-    except Exception as e: return Response({"error": str(e)}, status=500)
+        return Response({"answer": resp.choices[0].message.content})
+    except: return Response({"error": "AI Error"}, 500)
 
-# ==========================================
-# 3. FOOD SCANNER
-# ==========================================
 @method_decorator(csrf_exempt, name='dispatch')
 class ScanFoodView(APIView):
-    parser_classes = (MultiPartParser, FormParser)
-    authentication_classes = [] 
-    permission_classes = []
-
-    def post(self, request, *args, **kwargs):
-        if 'image' not in request.FILES: return Response({"error": "No image"}, status=400)
-        image_file = request.FILES['image']
-        base64_img = encode_image(image_file)
-
-        prompt = """
-        Identify food. Estimate calories/macros. Return strictly valid JSON:
-        { "food_name": "...", "estimated_calories": 0, "protein": 0.0, "carbs": 0.0, "fat": 0.0 }
-        """
-        
-        # Priority list (Gemini First because it SUCCESS)
-        models = [
-            "google/gemini-2.0-flash-exp:free", 
-            "qwen/qwen2.5-vl-72b-instruct:free", # Fixed ID
-        ]
-
-        for model in models:
-            try:
-                response_text = call_openrouter_vision(model, prompt, base64_img)
-                clean = response_text.strip().replace("```json", "").replace("```", "").strip()
-                data = json.loads(clean)
-                
-                new_food = FoodItem.objects.create(
-                    name=data.get('food_name', 'Unknown'),
-                    calories=int(data.get('estimated_calories', 0)),
-                    protein=float(data.get('protein', 0.0)),
-                    carbs=float(data.get('carbs', 0.0)),
-                    fat=float(data.get('fat', 0.0)),
-                )
-                return Response({"message": "Success", "saved_data": {"name": new_food.name, "calories": new_food.calories}})
-            except Exception:
-                continue 
-
-        return Response({"error": "All vision models failed. Please try again later."}, status=500)
-
-# ==========================================
-# 4. ROSTER ANALYZER (CORRECTED IDs)
-# ==========================================
-@method_decorator(csrf_exempt, name='dispatch') 
-class AnalyzeRosterView(APIView):
     parser_classes = (MultiPartParser, FormParser)
     authentication_classes = []
     permission_classes = []
 
-    def post(self, request, *args, **kwargs):
-        if 'file' not in request.FILES:
-            return Response({"error": "No file provided."}, status=400)
-
-        image_file = request.FILES['file']
-        base64_img = encode_image(image_file)
+    def post(self, request):
+        if 'image' not in request.FILES: return Response({"error": "No image"}, 400)
+        img = request.FILES['image']
+        b64 = encode_image(img)
+        prompt = """Identify food. JSON: { "food_name": "...", "estimated_calories": 0, "protein": 0, "carbs": 0, "fat": 0 }"""
         
-        prompt_text = """
-        STRICT INSTRUCTION: Act as a structured data extraction API.
-        Analyze this timetable. Extract the weekly schedule.
-        Return ONLY valid JSON. No markdown.
-        Format:
-        {
-            "weekly_schedule": {
-                "Monday": [ {"time": "10:00", "event": "Math"} ],
-                "Tuesday": [ {"time": "09:00", "event": "Science"} ]
-            }
-        }
-        """
-
-        analysis_data = None
-        source_name = "None"
+        data, source = scan_with_openrouter(prompt, b64)
+        if not data: data, source = scan_with_huggingface(prompt, b64)
         
-        # --- CORRECTED PRIORITY LIST ---
-        # 1. Gemini 2.0 Flash (Your logs confirmed this works!)
-        # 2. Qwen 2.5 VL (Corrected ID: qwen2.5 not qwen-2.5)
-        # 3. Gemini 2.0 Pro (Backup)
-        models_to_try = [
-            "google/gemini-2.0-flash-exp:free",
-            "qwen/qwen2.5-vl-72b-instruct:free", #
-            "google/gemini-2.0-pro-exp-02-05:free"
-        ]
-
-        for model in models_to_try:
-            if analysis_data: break 
-
+        if data:
             try:
-                print(f"Attempting Roster Scan with {model}...")
-                response_text = call_openrouter_vision(model, prompt_text, base64_img)
-                
-                if response_text and "weekly_schedule" in response_text:
-                    analysis_data = response_text
-                    source_name = f"OpenRouter {model}"
-            except Exception as e:
-                print(f"Failed with {model}: {e}")
+                clean = data.strip().replace("```json", "").replace("```", "").strip()
+                j = json.loads(clean)
+                FoodItem.objects.create(
+                    name=j.get('food_name','?'), 
+                    calories=j.get('estimated_calories',0),
+                    protein=j.get('protein',0),
+                    carbs=j.get('carbs',0),
+                    fat=j.get('fat',0)
+                )
+                return Response({"message": "Success", "saved_data": j})
+            except: pass
+        return Response({"error": "Scan failed"}, 500)
 
-        # --- FINAL PROCESSING ---
-        if analysis_data:
-            try:
-                clean = analysis_data.strip().replace("```json", "").replace("```", "").strip()
-                data = json.loads(clean)
-                
-                if 'weekly_schedule' not in data:
-                    if isinstance(data, dict): data = {"weekly_schedule": data}
-                    else: raise ValueError("Invalid JSON")
-                
-                data['ai_source'] = source_name
-                return Response(data)
-            except Exception as e:
-                return Response({"error": f"JSON Error ({source_name}): {str(e)}", "raw": analysis_data}, status=500)
-        
-        return Response({"error": "All OpenRouter models failed (Busy/Offline). Try again in 10s."}, status=500)
-
-# ==========================================
-# 5. MEAL PLANNING
-# ==========================================
 @csrf_exempt
 @api_view(['POST', 'GET'])
 @authentication_classes([])
@@ -282,8 +262,7 @@ def user_profile_view(request):
 @authentication_classes([])
 @permission_classes([])
 def generate_meal_plan(request):
-    try:
-        return Response({"meals": []}) 
+    try: return Response({"meals": []}) 
     except: return Response({"error": "Error"}, status=500)
 
 @csrf_exempt
@@ -291,6 +270,5 @@ def generate_meal_plan(request):
 @authentication_classes([])
 @permission_classes([])
 def swap_meal(request):
-    try:
-        return Response({"name": "New Meal"})
+    try: return Response({"name": "New Meal"})
     except: return Response({"error": "Error"}, status=500)
