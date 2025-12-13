@@ -54,7 +54,7 @@ def safe_json_extract(text):
 def scan_with_openrouter(prompt, base64_img):
     if not OPENROUTER_KEY: return None, None
     
-    # Priority List
+    # Priority List of Free Models
     models = [
         "google/gemini-2.0-flash-exp:free",      
         "qwen/qwen-2.5-vl-72b-instruct:free",    
@@ -155,7 +155,7 @@ def scan_with_specialized_vision(prompt, base64_img):
     return None, None
 
 # ==========================================
-# 1. DIAGNOSTIC ENDPOINT (SMARTER)
+# 1. DIAGNOSTIC ENDPOINT (NUCLEAR OPTION)
 # ==========================================
 @csrf_exempt 
 @api_view(['GET'])
@@ -182,17 +182,18 @@ def ai_status_check(request):
                 results["OpenRouter"] = f"Warning: {str(e)[:50]}"
     else: results["OpenRouter"] = "MISSING KEY"
 
-    # HF Check (Using Zephyr - Standard Free Chat Model)
+    # HF Check (Using DistilBERT - The "Always Online" Model)
     if HF_KEY:
         try:
             client = InferenceClient(api_key=HF_KEY)
-            client.chat_completion(
-                model="HuggingFaceH4/zephyr-7b-beta", 
-                messages=[{"role": "user", "content": "Hi"}], 
-                max_tokens=5
+            # Text Classification is the cheapest, most stable inference task
+            client.text_classification(
+                model="distilbert-base-uncased-finetuned-sst-2-english", 
+                text="Ping"
             )
             results["HuggingFace"] = "SUCCESS"
-        except Exception as e: results["HuggingFace"] = f"FAILED: {str(e)[:50]}"
+        except Exception as e: 
+            results["HuggingFace"] = f"FAILED: {str(e)[:50]}"
     else: results["HuggingFace"] = "MISSING KEY"
 
     return Response(results)
@@ -301,13 +302,11 @@ class ScanFoodView(APIView):
 @authentication_classes([])
 @permission_classes([])
 def user_profile_view(request):
-    # Only create admin in DEBUG mode
     if settings.DEBUG and not User.objects.exists():
         try: User.objects.create_superuser('admin', 'admin@example.com', 'admin123')
         except: pass 
     
     user = User.objects.first()
-    # In production with no users, return 404 instead of crashing
     if not user: return Response({"error": "No users found"}, status=404)
 
     profile, _ = UserProfile.objects.get_or_create(user=user)
