@@ -43,6 +43,7 @@ def safe_json_extract(text):
     except Exception:
         pass
     try:
+        # Fallback: remove code blocks
         clean = text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except:
@@ -54,7 +55,7 @@ def safe_json_extract(text):
 def scan_with_openrouter(prompt, base64_img):
     if not OPENROUTER_KEY: return None, None
     
-    # Priority List
+    # Priority List - Verified Free Models
     models = [
         "google/gemini-2.0-flash-exp:free",      
         "qwen/qwen-2.5-vl-72b-instruct:free",    
@@ -87,13 +88,13 @@ def scan_with_openrouter(prompt, base64_img):
     return None, None
 
 # =========================================================================
-# LAYER 2: HUGGING FACE CHAT (Qwen 2-VL)
+# LAYER 2: HUGGING FACE CHAT (With Retry Logic)
 # =========================================================================
 def scan_with_hf_chat(prompt, base64_img):
     if not HF_KEY: return None, None
     
-    # Use Qwen2-VL (older stable version) to fix 404 errors
-    model_id = "Qwen/Qwen2-VL-7B-Instruct"
+    # Qwen 2.5 VL 7B - Best Free HF Model
+    model_id = "Qwen/Qwen2.5-VL-7B-Instruct"
     client = InferenceClient(api_key=HF_KEY)
 
     for attempt in range(2): 
@@ -155,7 +156,7 @@ def scan_with_specialized_vision(prompt, base64_img):
     return None, None
 
 # ==========================================
-# 1. DIAGNOSTIC ENDPOINT (SMARTER)
+# 1. DIAGNOSTIC ENDPOINT (FIXED & RELIABLE)
 # ==========================================
 @csrf_exempt 
 @api_view(['GET'])
@@ -182,13 +183,19 @@ def ai_status_check(request):
                 results["OpenRouter"] = f"Warning: {str(e)[:50]}"
     else: results["OpenRouter"] = "MISSING KEY"
 
-    # HF Check (Using Flan-T5 - Always Online)
+    # HF Check (Using Flan-T5 - The Gold Standard for Uptime)
     if HF_KEY:
         try:
             client = InferenceClient(api_key=HF_KEY)
-            client.text_generation(model="google/flan-t5-small", prompt="Hi", max_new_tokens=2)
+            # Use text_generation on a small model that is always cached
+            client.text_generation(
+                model="google/flan-t5-small", 
+                prompt="Hello", 
+                max_new_tokens=5
+            )
             results["HuggingFace"] = "SUCCESS"
-        except Exception as e: results["HuggingFace"] = f"FAILED: {str(e)[:50]}"
+        except Exception as e: 
+            results["HuggingFace"] = f"FAILED: {str(e)[:50]}"
     else: results["HuggingFace"] = "MISSING KEY"
 
     return Response(results)
@@ -297,11 +304,13 @@ class ScanFoodView(APIView):
 @authentication_classes([])
 @permission_classes([])
 def user_profile_view(request):
+    # Only create admin in DEBUG mode
     if settings.DEBUG and not User.objects.exists():
         try: User.objects.create_superuser('admin', 'admin@example.com', 'admin123')
         except: pass 
     
     user = User.objects.first()
+    # In production with no users, return 404 instead of crashing
     if not user: return Response({"error": "No users found"}, status=404)
 
     profile, _ = UserProfile.objects.get_or_create(user=user)
