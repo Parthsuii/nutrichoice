@@ -1,8 +1,9 @@
 from rest_framework.decorators import api_view, parser_classes, authentication_classes, permission_classes
-from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView # <--- FIXED IMPORT
+from rest_framework import serializers # <--- Added for safety
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.contrib.auth.models import User
@@ -39,7 +40,7 @@ def scan_with_openrouter(prompt, base64_img):
     # Priority List including QWEN 2.5 VL (High Accuracy)
     models = [
         "google/gemini-2.0-flash-exp:free",      
-        "qwen/qwen-2.5-vl-72b-instruct:free",    # <--- NEW: High Accuracy!
+        "qwen/qwen-2.5-vl-72b-instruct:free",    
         "meta-llama/llama-3.2-11b-vision-instruct:free",
         "google/gemini-1.5-flash:free",          
     ]
@@ -50,7 +51,10 @@ def scan_with_openrouter(prompt, base64_img):
         try:
             print(f"Trying Layer 1 (OpenRouter): {model}...")
             completion = client.chat.completions.create(
-                extra_headers={"HTTP-Referer": SITE_URL, "X-Title": APP_NAME},
+                extra_headers={
+                    "HTTP-Referer": SITE_URL,
+                    "X-Title": APP_NAME
+                },
                 model=model,
                 messages=[{
                     "role": "user",
@@ -103,25 +107,19 @@ def scan_with_hf_chat(prompt, base64_img):
 def scan_with_specialized_vision(prompt, base64_img):
     """
     Uses Florence-2 or Moondream. These are NOT chat models.
-    They are specialized 'Image-to-Text' models.
     """
     if not HF_KEY: return None, None
     client = InferenceClient(api_key=HF_KEY)
     
     # 1. Florence-2 (Microsoft) - The OCR King
-    # We use the '<OCR>' or '<MORE_DETAILED_CAPTION>' task prompts
     try:
         print("Trying Layer 3 (Florence-2)...")
-        # Florence requires a specific task prompt. 
-        # Since we want a schedule, we ask for detailed text.
         florence_prompt = "<MORE_DETAILED_CAPTION>" 
-        
         result = client.image_to_text(
             model="microsoft/Florence-2-large",
             image=base64.b64decode(base64_img),
             prompt=florence_prompt
         )
-        # Result is like: "The image shows a timetable..."
         return json.dumps({"raw_text": result, "note": "Parsed by Florence-2"}), "HF Florence-2"
     except Exception as e:
         print(f"Florence-2 failed: {e}")
@@ -129,13 +127,11 @@ def scan_with_specialized_vision(prompt, base64_img):
     # 2. Moondream2 (Vikhyat) - The Tiny Giant
     try:
         print("Trying Layer 3 (Moondream2)...")
-        # Moondream is a VQA model
         answer = client.visual_question_answering(
             image=base64.b64decode(base64_img),
             question="Read the text in this image and describe the schedule.",
             model="vikhyatk/moondream2"
         )
-        # VQA returns a list of answers
         final_text = answer[0]['answer'] if answer else "No text found"
         return json.dumps({"raw_text": final_text, "note": "Parsed by Moondream"}), "HF Moondream2"
     except Exception as e:
@@ -144,7 +140,7 @@ def scan_with_specialized_vision(prompt, base64_img):
     return None, None
 
 # ==========================================
-# 1. DIAGNOSTIC ENDPOINT
+# 1. DIAGNOSTIC ENDPOINT (FIXED)
 # ==========================================
 @csrf_exempt 
 @api_view(['GET'])
@@ -153,24 +149,27 @@ def scan_with_specialized_vision(prompt, base64_img):
 def ai_status_check(request):
     results = {}
     
-    # Check OpenRouter
+    # Check OpenRouter (Using Llama 3 - Guaranteed Text Model)
     if OPENROUTER_KEY:
         try:
             client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
             client.chat.completions.create(
-                model="google/gemini-1.5-flash:free",
-                messages=[{"role": "user", "content": "Hi"}]
+                model="meta-llama/llama-3.1-8b-instruct:free",
+                messages=[{"role": "user", "content": "Hi"}],
+                extra_headers={
+                    "HTTP-Referer": SITE_URL,
+                    "X-Title": APP_NAME
+                }
             )
             results["OpenRouter"] = "SUCCESS"
         except Exception as e: results["OpenRouter"] = f"Warning: {str(e)[:50]}"
     else: results["OpenRouter"] = "MISSING KEY"
 
-    # Check Hugging Face (Florence-2 Check)
+    # Check Hugging Face (Using Flan-T5 - Guaranteed Inference Model)
     if HF_KEY:
         try:
             client = InferenceClient(api_key=HF_KEY)
-            # Use gpt2 for connection check, safe and fast
-            client.text_generation(model="gpt2", prompt="Hi", max_new_tokens=2)
+            client.text_generation(model="google/flan-t5-small", prompt="Hi", max_new_tokens=5)
             results["HuggingFace"] = "SUCCESS"
         except Exception as e: results["HuggingFace"] = f"FAILED: {str(e)[:50]}"
     else: results["HuggingFace"] = "MISSING KEY"
@@ -197,28 +196,25 @@ class AnalyzeRosterView(APIView):
         Format: { "weekly_schedule": { "Monday": [{"time": "...", "event": "..."}] } }
         """
 
-        # LAYER 1: OpenRouter (Best Quality)
+        # LAYER 1: OpenRouter
         data, source = scan_with_openrouter(prompt, base64_img)
         
-        # LAYER 2: HF Chat (Qwen 2.5)
+        # LAYER 2: HF Chat
         if not data:
             data, source = scan_with_hf_chat(prompt, base64_img)
 
-        # LAYER 3: Specialized Vision (Florence/Moondream)
-        # Note: These return raw text/captions, not perfect JSON
+        # LAYER 3: Specialized Vision
         if not data:
             data, source = scan_with_specialized_vision(prompt, base64_img)
 
         # Process Result
         if data:
             try:
-                # Try to parse as JSON (Layers 1 & 2)
                 clean = data.strip().replace("```json", "").replace("```", "").strip()
                 json_data = json.loads(clean)
                 json_data['ai_source'] = source
                 return Response(json_data)
             except:
-                # If Layer 3 returned raw text or JSON parsing failed
                 return Response({
                     "weekly_schedule": {"Note": "Raw text extracted (Layer 3)"},
                     "raw_text": data,
@@ -228,7 +224,7 @@ class AnalyzeRosterView(APIView):
         return Response({"error": "All AI models (Layers 1, 2, & 3) failed."}, status=500)
 
 # ==========================================
-# 3. STANDARD VIEWS (Unchanged)
+# 3. STANDARD VIEWS
 # ==========================================
 class FoodItemList(ListCreateAPIView):
     queryset = FoodItem.objects.all()
@@ -250,8 +246,9 @@ def ask_nutritionist(request):
     try:
         client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
         resp = client.chat.completions.create(
-            model="google/gemini-2.0-flash-exp:free",
-            messages=[{"role": "user", "content": q}]
+            model="meta-llama/llama-3.1-8b-instruct:free", # Use safe text model for Q&A
+            messages=[{"role": "user", "content": q}],
+            extra_headers={"HTTP-Referer": SITE_URL, "X-Title": APP_NAME}
         )
         return Response({"answer": resp.choices[0].message.content})
     except: return Response({"error": "AI Error"}, 500)
