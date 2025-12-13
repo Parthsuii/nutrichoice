@@ -2,11 +2,12 @@ from rest_framework.decorators import api_view, parser_classes, authentication_c
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView # <--- FIXED IMPORT
-from rest_framework import serializers # <--- Added for safety
+from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
+from rest_framework import serializers
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.contrib.auth.models import User
+from django.conf import settings # <--- Added for Security Check
 import os
 import base64
 import json
@@ -31,18 +32,35 @@ def encode_image(image_file):
     image_file.seek(0)
     return base64.b64encode(image_file.read()).decode('utf-8')
 
+# --- HELPER: Robust JSON Extraction (Fixes "Here is the JSON..." errors) ---
+def safe_json_extract(text):
+    """Finds the first '{' and last '}' to isolate JSON from AI chatter."""
+    try:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1:
+            return json.loads(text[start:end+1])
+    except Exception:
+        pass
+    # If standard parsing fails, try cleaning markdown blocks
+    try:
+        clean = text.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean)
+    except:
+        raise ValueError("No valid JSON found in AI response")
+
 # =========================================================================
 # LAYER 1: OPENROUTER SWARM (Chat VLMs)
 # =========================================================================
 def scan_with_openrouter(prompt, base64_img):
     if not OPENROUTER_KEY: return None, None
     
-    # Priority List including QWEN 2.5 VL (High Accuracy)
+    # Priority List - Verified Free Models
     models = [
-        "google/gemini-2.0-flash-exp:free",      
-        "qwen/qwen-2.5-vl-72b-instruct:free",    
+        "google/gemini-2.0-flash-exp:free",      # Verified Working
+        "qwen/qwen-2.5-vl-72b-instruct:free",    # High Accuracy
+        "google/gemini-1.5-flash:free",          # Backup
         "meta-llama/llama-3.2-11b-vision-instruct:free",
-        "google/gemini-1.5-flash:free",          
     ]
 
     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
@@ -73,45 +91,47 @@ def scan_with_openrouter(prompt, base64_img):
     return None, None
 
 # =========================================================================
-# LAYER 2: HUGGING FACE CHAT (Qwen 2.5 VL 7B)
+# LAYER 2: HUGGING FACE CHAT (With Retry Logic)
 # =========================================================================
 def scan_with_hf_chat(prompt, base64_img):
     if not HF_KEY: return None, None
     
-    # Qwen 2.5 VL 7B is the best "Free" Chat VLM on Hugging Face
+    # Qwen 2.5 VL 7B - Best Free HF Model
     model_id = "Qwen/Qwen2.5-VL-7B-Instruct"
-    
     client = InferenceClient(api_key=HF_KEY)
 
-    try:
-        print(f"Trying Layer 2 (HF Chat): {model_id}...")
-        completion = client.chat_completion(
-            model=model_id,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-                ]
-            }],
-            max_tokens=1000
-        )
-        return completion.choices[0].message.content, f"HuggingFace {model_id}"
-    except Exception as e:
-        print(f"Layer 2 failed: {e}")
-        return None, None
+    # Retry Loop: Handles "503 Model Loading" errors common on free tier
+    for attempt in range(2): 
+        try:
+            print(f"Trying Layer 2 (HF Chat): {model_id} (Attempt {attempt+1})...")
+            completion = client.chat_completion(
+                model=model_id,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_img}"
+                        }}
+                    ]
+                }],
+                max_tokens=800
+            )
+            return completion.choices[0].message.content, f"HuggingFace {model_id}"
+        except Exception as e:
+            print(f"Layer 2 failed (Attempt {attempt+1}): {e}")
+            time.sleep(1) # Wait for model to load
+
+    return None, None
 
 # =========================================================================
 # LAYER 3: SPECIALIZED VISION (Florence-2 / Moondream)
 # =========================================================================
 def scan_with_specialized_vision(prompt, base64_img):
-    """
-    Uses Florence-2 or Moondream. These are NOT chat models.
-    """
     if not HF_KEY: return None, None
     client = InferenceClient(api_key=HF_KEY)
     
-    # 1. Florence-2 (Microsoft) - The OCR King
+    # 1. Florence-2 (Microsoft)
     try:
         print("Trying Layer 3 (Florence-2)...")
         florence_prompt = "<MORE_DETAILED_CAPTION>" 
@@ -124,7 +144,7 @@ def scan_with_specialized_vision(prompt, base64_img):
     except Exception as e:
         print(f"Florence-2 failed: {e}")
 
-    # 2. Moondream2 (Vikhyat) - The Tiny Giant
+    # 2. Moondream2 (Vikhyat)
     try:
         print("Trying Layer 3 (Moondream2)...")
         answer = client.visual_question_answering(
@@ -140,7 +160,7 @@ def scan_with_specialized_vision(prompt, base64_img):
     return None, None
 
 # ==========================================
-# 1. DIAGNOSTIC ENDPOINT (FIXED)
+# 1. DIAGNOSTIC ENDPOINT
 # ==========================================
 @csrf_exempt 
 @api_view(['GET'])
@@ -149,27 +169,24 @@ def scan_with_specialized_vision(prompt, base64_img):
 def ai_status_check(request):
     results = {}
     
-    # Check OpenRouter (Using Llama 3 - Guaranteed Text Model)
+    # OpenRouter Check
     if OPENROUTER_KEY:
         try:
             client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
             client.chat.completions.create(
-                model="meta-llama/llama-3.1-8b-instruct:free",
+                model="google/gemini-2.0-flash-exp:free", 
                 messages=[{"role": "user", "content": "Hi"}],
-                extra_headers={
-                    "HTTP-Referer": SITE_URL,
-                    "X-Title": APP_NAME
-                }
+                extra_headers={"HTTP-Referer": SITE_URL, "X-Title": APP_NAME}
             )
             results["OpenRouter"] = "SUCCESS"
         except Exception as e: results["OpenRouter"] = f"Warning: {str(e)[:50]}"
     else: results["OpenRouter"] = "MISSING KEY"
 
-    # Check Hugging Face (Using Flan-T5 - Guaranteed Inference Model)
+    # HF Check (Text Model for Reliability)
     if HF_KEY:
         try:
             client = InferenceClient(api_key=HF_KEY)
-            client.text_generation(model="google/flan-t5-small", prompt="Hi", max_new_tokens=5)
+            client.text_generation(model="Qwen/Qwen2.5-7B-Instruct", prompt="Hi", max_new_tokens=2)
             results["HuggingFace"] = "SUCCESS"
         except Exception as e: results["HuggingFace"] = f"FAILED: {str(e)[:50]}"
     else: results["HuggingFace"] = "MISSING KEY"
@@ -199,7 +216,7 @@ class AnalyzeRosterView(APIView):
         # LAYER 1: OpenRouter
         data, source = scan_with_openrouter(prompt, base64_img)
         
-        # LAYER 2: HF Chat
+        # LAYER 2: HF Chat (Retry Enabled)
         if not data:
             data, source = scan_with_hf_chat(prompt, base64_img)
 
@@ -207,11 +224,11 @@ class AnalyzeRosterView(APIView):
         if not data:
             data, source = scan_with_specialized_vision(prompt, base64_img)
 
-        # Process Result
+        # Process Result with ROBUST Extraction
         if data:
             try:
-                clean = data.strip().replace("```json", "").replace("```", "").strip()
-                json_data = json.loads(clean)
+                # Use new safe extraction
+                json_data = safe_json_extract(data)
                 json_data['ai_source'] = source
                 return Response(json_data)
             except:
@@ -246,7 +263,7 @@ def ask_nutritionist(request):
     try:
         client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
         resp = client.chat.completions.create(
-            model="meta-llama/llama-3.1-8b-instruct:free", # Use safe text model for Q&A
+            model="google/gemini-2.0-flash-exp:free", 
             messages=[{"role": "user", "content": q}],
             extra_headers={"HTTP-Referer": SITE_URL, "X-Title": APP_NAME}
         )
@@ -270,8 +287,8 @@ class ScanFoodView(APIView):
         
         if data:
             try:
-                clean = data.strip().replace("```json", "").replace("```", "").strip()
-                j = json.loads(clean)
+                # Use new safe extraction
+                j = safe_json_extract(data)
                 FoodItem.objects.create(name=j.get('food_name','?'), calories=j.get('estimated_calories',0))
                 return Response({"message": "Success", "saved_data": j})
             except: pass
@@ -282,10 +299,18 @@ class ScanFoodView(APIView):
 @authentication_classes([])
 @permission_classes([])
 def user_profile_view(request):
-    if not User.objects.exists():
+    # SECURITY FIX: Only create admin if in DEBUG mode
+    if settings.DEBUG and not User.objects.exists():
         try: User.objects.create_superuser('admin', 'admin@example.com', 'admin123')
         except: pass 
+    
+    # Ensure a profile exists for the first user found (safe fallthrough)
     user = User.objects.first()
+    if not user:
+         # If no user exists (Prod), return empty/default logic or 404 depending on your need
+         # For now, we return 404 to avoid crashing
+         return Response({"error": "No users found"}, status=404)
+
     profile, _ = UserProfile.objects.get_or_create(user=user)
     if request.method == 'GET': return Response(UserProfileSerializer(profile).data)
     if request.method == 'POST':
