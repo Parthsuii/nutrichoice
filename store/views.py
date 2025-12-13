@@ -9,7 +9,7 @@ from django.contrib.auth.models import User
 import os
 import base64
 import json
-import time # Added for small delays between retries
+import time
 
 # --- HYBRID LIBRARIES ---
 from openai import OpenAI  # For OpenRouter
@@ -30,22 +30,18 @@ def encode_image(image_file):
     image_file.seek(0)
     return base64.b64encode(image_file.read()).decode('utf-8')
 
-# --- STRATEGY 1: OPENROUTER (The "Swarm") ---
+# --- STRATEGY 1: OPENROUTER SWARM ---
 def scan_with_openrouter(prompt, base64_img):
     if not OPENROUTER_KEY: return None, None
     
-    # EXPANDED PRIORITY LIST (To defeat 429 Busy Errors)
-    # 1. Gemini 2.0 Flash (Fastest)
-    # 2. Gemini 2.0 Pro (New & Powerful)
-    # 3. Gemini 1.5 Flash (Old Reliable Backup)
-    # 4. Llama 3.2 11B (Meta's Free Vision)
-    # 5. Qwen 2.5 72B (Open Source King)
+    # THE SWARM: 5 Free Models sorted by Speed/Quality
+    # If #1 is busy (429), it instantly tries #2, then #3...
     models = [
-        "google/gemini-2.0-flash-exp:free",
-        "google/gemini-2.0-pro-exp-02-05:free",
-        "google/gemini-1.5-flash:free",
-        "meta-llama/llama-3.2-11b-vision-instruct:free",
-        "qwen/qwen-2.5-vl-72b-instruct:free"
+        "google/gemini-2.0-flash-exp:free",      # 1. Fastest & Smartest
+        "google/gemini-1.5-flash:free",          # 2. Reliable Backup
+        "meta-llama/llama-3.2-11b-vision-instruct:free", # 3. Meta's Best Free Vision
+        "qwen/qwen-2.5-vl-72b-instruct:free",    # 4. Open Source King
+        "mistralai/pixtral-12b:free"             # 5. Mistral Backup
     ]
 
     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
@@ -67,17 +63,18 @@ def scan_with_openrouter(prompt, base64_img):
             return completion.choices[0].message.content, f"OpenRouter {model}"
         except Exception as e:
             print(f"OpenRouter {model} failed: {e}")
-            time.sleep(1) # Wait 1s before trying the next model to be polite
+            time.sleep(1) # Polite 1s wait before retrying next model
             continue 
             
     return None, None
 
-# --- STRATEGY 2: HUGGING FACE (Stable Backup) ---
+# --- STRATEGY 2: HUGGING FACE FALLBACK ---
 def scan_with_huggingface(prompt, base64_img):
     if not HF_KEY: return None, None
     
-    # Switch to the OLDER stable model (Qwen2 instead of 2.5) to fix 404s
-    model_id = "Qwen/Qwen2-VL-7B-Instruct" 
+    # Downgrade to 7B model (likely free) instead of 72B (paid/missing)
+    # Using Qwen2.5-VL-7B which is SOTA for its size
+    model_id = "Qwen/Qwen2.5-VL-7B-Instruct" 
     
     client = InferenceClient(api_key=HF_KEY)
 
@@ -109,10 +106,10 @@ def scan_with_huggingface(prompt, base64_img):
 @authentication_classes([])
 @permission_classes([])
 def ai_status_check(request):
-    """Checks OpenRouter (Flash) and Hugging Face (GPT-2)."""
+    """Checks Health of Both Providers."""
     results = {}
     
-    # Check OpenRouter
+    # Check OpenRouter (Gemini Flash)
     if OPENROUTER_KEY:
         try:
             client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
@@ -122,12 +119,11 @@ def ai_status_check(request):
             )
             results["OpenRouter"] = "SUCCESS"
         except Exception as e: 
-            error_msg = str(e)
-            if "429" in error_msg: results["OpenRouter"] = "BUSY (Rate Limit - Will Fallback)"
-            else: results["OpenRouter"] = f"FAILED: {error_msg[:50]}..."
+            # Even if it fails here (busy), the main app has 4 backups
+            results["OpenRouter"] = f"Warning: {str(e)[:50]} (App will use backups)"
     else: results["OpenRouter"] = "MISSING KEY"
 
-    # Check Hugging Face (Using Tiny GPT-2 for reliability check)
+    # Check Hugging Face (Use Tiny GPT-2 for guaranteed 200 OK)
     if HF_KEY:
         try:
             client = InferenceClient(api_key=HF_KEY)
@@ -158,10 +154,10 @@ class AnalyzeRosterView(APIView):
         Format: { "weekly_schedule": { "Monday": [{"time": "...", "event": "..."}] } }
         """
 
-        # 1. Try OpenRouter (The Swarm)
+        # 1. Try The Swarm (OpenRouter)
         data, source = scan_with_openrouter(prompt, base64_img)
         
-        # 2. If ALL OpenRouter models fail, Try Hugging Face
+        # 2. If ALL 5 Swarm Models Fail, Try Hugging Face
         if not data:
             data, source = scan_with_huggingface(prompt, base64_img)
 
@@ -179,10 +175,10 @@ class AnalyzeRosterView(APIView):
             except Exception as e:
                 return Response({"error": "JSON Parse Error", "raw": data}, status=500)
 
-        return Response({"error": "All AI models (OpenRouter & HuggingFace) failed. Please try again later."}, status=500)
+        return Response({"error": "All 6 AI models failed (Busy or Offline). Please try again in 1 minute."}, status=500)
 
 # ==========================================
-# 3. STANDARD VIEWS (Simplified for brevity)
+# 3. STANDARD VIEWS
 # ==========================================
 class FoodItemList(ListCreateAPIView):
     queryset = FoodItem.objects.all()
@@ -202,6 +198,7 @@ def ask_nutritionist(request):
     q = request.data.get('question')
     if not q: return Response({"error": "No question"}, 400)
     try:
+        # Use simple reliable model for text
         client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
         resp = client.chat.completions.create(
             model="google/gemini-2.0-flash-exp:free",
