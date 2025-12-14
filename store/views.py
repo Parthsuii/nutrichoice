@@ -13,7 +13,7 @@ import base64
 import json
 import time
 import requests 
-import re 
+import re # <--- REQUIRED for JSON repair
 
 # --- HYBRID LIBRARIES ---
 from openai import OpenAI  # For OpenRouter
@@ -36,7 +36,7 @@ def encode_image(image_file):
     image_file.seek(0)
     return base64.b64encode(image_file.read()).decode('utf-8')
 
-# --- HELPER: Robust JSON Extraction ---
+# --- HELPER: Robust JSON Extraction (Regex Enhanced) ---
 def safe_json_extract(text):
     """Robust extraction that fixes 'lazy' JSON (missing quotes) using Regex."""
     if not text: return None
@@ -51,17 +51,19 @@ def safe_json_extract(text):
         pass
 
     try:
-        # 3. FIX: Add quotes to unquoted keys
+        # 3. FIX: Add quotes to unquoted keys (e.g. {time: ...} -> {"time": ...})
         fixed_text = re.sub(r'(?<!")(\b\w+\b)(?=\s*:)', r'"\1"', text)
-        # 4. FIX: Add quotes to unquoted string values
+        
+        # 4. FIX: Add quotes to unquoted string values (e.g. event: Math -> event: "Math")
         fixed_text = re.sub(r'(:\s*)([a-zA-Z_]\w*)(?=\s*[,}])', r'\1"\2"', fixed_text)
+        
         return json.loads(fixed_text)
     except Exception as e:
         print(f"JSON Repair Failed: {e}")
         return None
 
 # =========================================================================
-# LAYER 0: GOOGLE DIRECT (Priority: Gemini 2.0+)
+# LAYER 0: GOOGLE DIRECT (Priority: Gemini 2.0 -> 1.5)
 # =========================================================================
 def scan_with_google_direct(prompt, base64_img):
     if not GOOGLE_KEY: 
@@ -72,25 +74,24 @@ def scan_with_google_direct(prompt, base64_img):
     try:
         genai.configure(api_key=GOOGLE_KEY)
         
-        # PRIORITY: Try Gemini 2.0 Flash Experimental first
-        # If it fails (beta access issues), fallback to 1.5 Flash
-        model_name = 'gemini-2.0-flash-exp' 
-        
+        # PRIORITY 1: Try Gemini 2.0 Flash Experimental (SOTA)
         try:
-            model = genai.GenerativeModel(model_name)
+            model = genai.GenerativeModel('gemini-2.0-flash-exp')
             response = model.generate_content([
                 {'mime_type': 'image/jpeg', 'data': base64_img},
                 prompt
             ])
-            if response.text: return response.text, f"Google Direct ({model_name})"
-        except:
-            print("Gemini 2.0 Direct failed, falling back to 1.5 Flash...")
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            response = model.generate_content([
-                {'mime_type': 'image/jpeg', 'data': base64_img},
-                prompt
-            ])
-            if response.text: return response.text, "Google Direct (1.5 Flash)"
+            if response.text: return response.text, "Google Direct (Gemini 2.0)"
+        except Exception as e:
+            print(f"Gemini 2.0 Direct failed ({str(e)[:50]}), falling back to 1.5 Flash...")
+        
+        # PRIORITY 2: Fallback to 1.5 Flash (Reliable)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content([
+            {'mime_type': 'image/jpeg', 'data': base64_img},
+            prompt
+        ])
+        if response.text: return response.text, "Google Direct (1.5 Flash)"
 
     except Exception as e:
         print(f"Layer 0 (Google) Failed: {e}")
@@ -98,7 +99,7 @@ def scan_with_google_direct(prompt, base64_img):
     return None, None
 
 # =========================================================================
-# LAYER 1: OPENROUTER SWARM (Priority: Gemini 2.0 > Pixtral > Others)
+# LAYER 1: OPENROUTER SWARM (Priority: Gemini 2.0 > Pixtral > Qwen)
 # =========================================================================
 def scan_with_openrouter(prompt, base64_img):
     if not OPENROUTER_KEY: 
@@ -107,7 +108,7 @@ def scan_with_openrouter(prompt, base64_img):
     
     # UPDATED PRIORITY LIST
     models = [
-        "google/gemini-2.0-flash-exp:free",      # 1. Top Priority (SOTA)
+        "google/gemini-2.0-flash-exp:free",      # 1. Gemini 2.0 (Best)
         "mistralai/pixtral-12b:free",            # 2. Pixtral (Great Vision)
         "qwen/qwen-2.5-vl-72b-instruct:free",    # 3. Qwen 2.5 (Strong Fallback)
         "meta-llama/llama-3.2-11b-vision-instruct:free", # 4. Llama 3.2
@@ -187,7 +188,7 @@ def ai_status_check(request):
     return Response(results)
 
 # ==========================================
-# 2. ROSTER SCANNER (Google -> OpenRouter)
+# 2. ROSTER SCANNER (Robust)
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):
@@ -210,12 +211,12 @@ class AnalyzeRosterView(APIView):
         4. Do not include comments or trailing commas.
         """
 
-        print("--- STARTING SCAN ---")
+        print("--- STARTING ROSTER SCAN ---")
 
-        # 1. TRY GOOGLE DIRECT (Gemini 2.0 -> 1.5)
+        # 1. TRY GOOGLE DIRECT
         data, source = scan_with_google_direct(prompt, base64_img)
 
-        # 2. TRY OPENROUTER SWARM (Gemini 2.0 -> Pixtral -> Qwen)
+        # 2. TRY OPENROUTER SWARM
         if not data:
             data, source = scan_with_openrouter(prompt, base64_img)
 
@@ -225,6 +226,7 @@ class AnalyzeRosterView(APIView):
              return Response({"error": "All AI Services Busy. Try again in 1 min."}, status=503)
 
         try:
+            # Safe Extract (Regex fixes lazy JSON)
             json_data = safe_json_extract(data)
             
             if json_data:
@@ -261,7 +263,64 @@ class AnalyzeRosterView(APIView):
             return Response({"error": "Failed to parse result."}, status=500)
 
 # ==========================================
-# 3. STANDARD VIEWS
+# 3. FOOD SCANNER (Robust & Cleaned)
+# ==========================================
+@method_decorator(csrf_exempt, name='dispatch')
+class ScanFoodView(APIView):
+    parser_classes = (MultiPartParser, FormParser)
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        if 'image' not in request.FILES: return Response({"error": "No image"}, 400)
+        img = request.FILES['image']
+        b64 = encode_image(img)
+        
+        # STRONGER PROMPT: Force integers for calories
+        prompt = """
+        Analyze this food image. 
+        Output STRICT JSON ONLY.
+        Format: { "food_name": "Burger", "estimated_calories": 500, "protein": 20, "carbs": 40, "fat": 25 }
+        Rules:
+        1. "estimated_calories" must be a NUMBER (Integer), do not add "kcal" or text.
+        2. "food_name" must be a string.
+        3. Do not include markdown formatting.
+        """
+        
+        print("--- STARTING FOOD SCAN ---")
+        
+        # 1. Google Direct
+        data, source = scan_with_google_direct(prompt, b64)
+        # 2. OpenRouter Fallback
+        if not data: data, source = scan_with_openrouter(prompt, b64)
+        
+        print(f"DEBUG: Food Source: {source}")
+
+        if data:
+            try:
+                j = safe_json_extract(data)
+                if j:
+                    # FIX: Safely convert calories to int (remove 'kcal', whitespace)
+                    try:
+                        cal_raw = str(j.get('estimated_calories', 0))
+                        cal_clean = "".join(filter(str.isdigit, cal_raw))
+                        calories = int(cal_clean) if cal_clean else 0
+                    except:
+                        calories = 0 # Default if failed
+
+                    FoodItem.objects.create(name=j.get('food_name','Unknown'), calories=calories)
+                    
+                    j['ai_source'] = source
+                    return Response({"message": "Success", "saved_data": j})
+            except Exception as e:
+                print(f"Food Parsing Failed: {e}")
+                # Don't fail silently, return error so Flutter sees it
+                return Response({"error": "Failed to parse food data"}, 500)
+
+        return Response({"error": "Scan failed (No Data)"}, 500)
+
+# ==========================================
+# 4. STANDARD VIEWS
 # ==========================================
 class FoodItemList(ListCreateAPIView):
     queryset = FoodItem.objects.all()
@@ -297,32 +356,6 @@ def ask_nutritionist(request):
         )
         return Response({"answer": resp.choices[0].message.content})
     except: return Response({"error": "AI Error"}, 500)
-
-@method_decorator(csrf_exempt, name='dispatch')
-class ScanFoodView(APIView):
-    parser_classes = (MultiPartParser, FormParser)
-    authentication_classes = []
-    permission_classes = []
-
-    def post(self, request):
-        if 'image' not in request.FILES: return Response({"error": "No image"}, 400)
-        img = request.FILES['image']
-        b64 = encode_image(img)
-        prompt = """Identify food. JSON: { "food_name": "...", "estimated_calories": 0, "protein": 0, "carbs": 0, "fat": 0 }"""
-        
-        # 1. Google Direct
-        data, source = scan_with_google_direct(prompt, b64)
-        # 2. OpenRouter Fallback
-        if not data: data, source = scan_with_openrouter(prompt, b64)
-        
-        if data:
-            try:
-                j = safe_json_extract(data)
-                if j:
-                    FoodItem.objects.create(name=j.get('food_name','?'), calories=j.get('estimated_calories',0))
-                    return Response({"message": "Success", "saved_data": j})
-            except: pass
-        return Response({"error": "Scan failed"}, 500)
 
 @csrf_exempt
 @api_view(['POST', 'GET'])
