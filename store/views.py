@@ -13,7 +13,7 @@ import base64
 import json
 import time
 import requests 
-import re # <--- ADDED THIS FOR REGEX CLEANING
+import re 
 
 # --- HYBRID LIBRARIES ---
 from openai import OpenAI  # For OpenRouter
@@ -36,7 +36,7 @@ def encode_image(image_file):
     image_file.seek(0)
     return base64.b64encode(image_file.read()).decode('utf-8')
 
-# --- HELPER: Robust JSON Extraction (UPDATED) ---
+# --- HELPER: Robust JSON Extraction ---
 def safe_json_extract(text):
     """Robust extraction that fixes 'lazy' JSON (missing quotes) using Regex."""
     if not text: return None
@@ -51,21 +51,17 @@ def safe_json_extract(text):
         pass
 
     try:
-        # 3. FIX: Add quotes to unquoted keys (e.g., { key: value } -> { "key": value })
-        # Pattern: Find word followed by colon, NOT already quoted
+        # 3. FIX: Add quotes to unquoted keys
         fixed_text = re.sub(r'(?<!")(\b\w+\b)(?=\s*:)', r'"\1"', text)
-        
-        # 4. FIX: Add quotes to unquoted string values (e.g., "event": ROBO -> "event": "ROBO")
-        # Pattern: "key": value (where value is text, starts with letter, and no quotes)
+        # 4. FIX: Add quotes to unquoted string values
         fixed_text = re.sub(r'(:\s*)([a-zA-Z_]\w*)(?=\s*[,}])', r'\1"\2"', fixed_text)
-
         return json.loads(fixed_text)
     except Exception as e:
         print(f"JSON Repair Failed: {e}")
         return None
 
 # =========================================================================
-# LAYER 0: GOOGLE DIRECT (The Tank - 15 RPM Free)
+# LAYER 0: GOOGLE DIRECT (Priority: Gemini 2.0+)
 # =========================================================================
 def scan_with_google_direct(prompt, base64_img):
     if not GOOGLE_KEY: 
@@ -75,38 +71,47 @@ def scan_with_google_direct(prompt, base64_img):
     print("Trying Layer 0 (Google Direct)...")
     try:
         genai.configure(api_key=GOOGLE_KEY)
-        # Use Flash 1.5 - Fast, Free, Vision-Native
-        model = genai.GenerativeModel('gemini-1.5-flash')
         
-        # Google SDK expects a dict for image data
-        response = model.generate_content([
-            {'mime_type': 'image/jpeg', 'data': base64_img},
-            prompt
-        ])
+        # PRIORITY: Try Gemini 2.0 Flash Experimental first
+        # If it fails (beta access issues), fallback to 1.5 Flash
+        model_name = 'gemini-2.0-flash-exp' 
         
-        if response.text:
-            return response.text, "Google Gemini Direct"
-            
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content([
+                {'mime_type': 'image/jpeg', 'data': base64_img},
+                prompt
+            ])
+            if response.text: return response.text, f"Google Direct ({model_name})"
+        except:
+            print("Gemini 2.0 Direct failed, falling back to 1.5 Flash...")
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content([
+                {'mime_type': 'image/jpeg', 'data': base64_img},
+                prompt
+            ])
+            if response.text: return response.text, "Google Direct (1.5 Flash)"
+
     except Exception as e:
         print(f"Layer 0 (Google) Failed: {e}")
-        # Common Google Errors: 400 (Bad Request), 429 (Quota), 500
         
     return None, None
 
 # =========================================================================
-# LAYER 1: OPENROUTER SWARM (The Backup)
+# LAYER 1: OPENROUTER SWARM (Priority: Gemini 2.0 > Pixtral > Others)
 # =========================================================================
 def scan_with_openrouter(prompt, base64_img):
     if not OPENROUTER_KEY: 
         print("CRITICAL ERROR: OPENROUTER_API_KEY is missing!")
         return None, None
     
-    # Expanded Swarm
+    # UPDATED PRIORITY LIST
     models = [
-        "qwen/qwen-2.5-vl-72b-instruct:free",    # 1. High Accuracy
-        "meta-llama/llama-3.2-11b-vision-instruct:free", # 2. Llama
-        "microsoft/phi-3.5-vision-instruct:free", # 3. Phi
-        "google/gemini-2.0-flash-exp:free",      # 4. Fallback Google via OR
+        "google/gemini-2.0-flash-exp:free",      # 1. Top Priority (SOTA)
+        "mistralai/pixtral-12b:free",            # 2. Pixtral (Great Vision)
+        "qwen/qwen-2.5-vl-72b-instruct:free",    # 3. Qwen 2.5 (Strong Fallback)
+        "meta-llama/llama-3.2-11b-vision-instruct:free", # 4. Llama 3.2
+        "microsoft/phi-3.5-vision-instruct:free", # 5. Phi 3.5
     ]
 
     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
@@ -149,6 +154,7 @@ def ai_status_check(request):
     if GOOGLE_KEY:
         try:
             genai.configure(api_key=GOOGLE_KEY)
+            # Try 1.5 Flash for health check (safest)
             m = genai.GenerativeModel('gemini-1.5-flash')
             m.generate_content("Ping")
             results["GoogleDirect"] = "SUCCESS"
@@ -160,7 +166,7 @@ def ai_status_check(request):
         try:
             client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
             client.chat.completions.create(
-                model="microsoft/phi-3.5-vision-instruct:free", 
+                model="google/gemini-2.0-flash-exp:free", 
                 messages=[{"role": "user", "content": "Hi"}]
             )
             results["OpenRouter"] = "SUCCESS"
@@ -194,7 +200,6 @@ class AnalyzeRosterView(APIView):
         image_file = request.FILES['file']
         base64_img = encode_image(image_file)
         
-        # UPDATED PROMPT: Strict JSON to avoid lazy formatting
         prompt = """
         Analyze this timetable.
         Output STRICT VALID JSON only. 
@@ -207,10 +212,10 @@ class AnalyzeRosterView(APIView):
 
         print("--- STARTING SCAN ---")
 
-        # 1. TRY GOOGLE DIRECT (Best Chance)
+        # 1. TRY GOOGLE DIRECT (Gemini 2.0 -> 1.5)
         data, source = scan_with_google_direct(prompt, base64_img)
 
-        # 2. TRY OPENROUTER SWARM (Backup)
+        # 2. TRY OPENROUTER SWARM (Gemini 2.0 -> Pixtral -> Qwen)
         if not data:
             data, source = scan_with_openrouter(prompt, base64_img)
 
@@ -220,7 +225,6 @@ class AnalyzeRosterView(APIView):
              return Response({"error": "All AI Services Busy. Try again in 1 min."}, status=503)
 
         try:
-            # Use updated robust extractor
             json_data = safe_json_extract(data)
             
             if json_data:
