@@ -16,6 +16,7 @@ import requests
 
 # --- HYBRID LIBRARIES ---
 from openai import OpenAI  # For OpenRouter
+import google.generativeai as genai # For Google Direct
 
 # --- IMPORTS FROM YOUR APP ---
 from .models import FoodItem, UserProfile 
@@ -24,6 +25,8 @@ from .serializers import FoodItemSerializer, UserProfileSerializer
 # --- CONFIGURATION ---
 OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")
 HF_KEY = os.environ.get("HUGGINGFACE_API_KEY")
+GOOGLE_KEY = os.environ.get("GOOGLE_API_KEY") # <--- NEW KEY
+
 SITE_URL = "https://nutrichoice.onrender.com"
 APP_NAME = "NutriChoice"
 
@@ -50,29 +53,55 @@ def safe_json_extract(text):
         return None
 
 # =========================================================================
-# THE VISION SWARM (OpenRouter Only - Reliable Free Tier)
+# LAYER 0: GOOGLE DIRECT (The Tank - 15 RPM Free)
+# =========================================================================
+def scan_with_google_direct(prompt, base64_img):
+    if not GOOGLE_KEY: 
+        print("Skipping Layer 0: GOOGLE_API_KEY not found.")
+        return None, None
+    
+    print("Trying Layer 0 (Google Direct)...")
+    try:
+        genai.configure(api_key=GOOGLE_KEY)
+        # Use Flash 1.5 - Fast, Free, Vision-Native
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # Google SDK expects a dict for image data
+        response = model.generate_content([
+            {'mime_type': 'image/jpeg', 'data': base64_img},
+            prompt
+        ])
+        
+        if response.text:
+            return response.text, "Google Gemini Direct"
+            
+    except Exception as e:
+        print(f"Layer 0 (Google) Failed: {e}")
+        # Common Google Errors: 400 (Bad Request), 429 (Quota), 500
+        
+    return None, None
+
+# =========================================================================
+# LAYER 1: OPENROUTER SWARM (The Backup)
 # =========================================================================
 def scan_with_openrouter(prompt, base64_img):
     if not OPENROUTER_KEY: 
-        print("CRITICAL ERROR: OPENROUTER_API_KEY is missing from environment variables!")
+        print("CRITICAL ERROR: OPENROUTER_API_KEY is missing!")
         return None, None
     
-    # Expanded "Swarm" List (6 Models)
-    # The code will loop through these until one works.
+    # Expanded Swarm
     models = [
-        "google/gemini-2.0-flash-exp:free",      # 1. Best (Google)
-        "google/gemini-1.5-flash:free",          # 2. Reliable Backup (Google)
-        "qwen/qwen-2.5-vl-72b-instruct:free",    # 3. High Accuracy (Alibaba)
-        "qwen/qwen-2-vl-7b-instruct:free",       # 4. Faster/Smaller Qwen
-        "meta-llama/llama-3.2-11b-vision-instruct:free", # 5. Llama (Meta)
-        "microsoft/phi-3.5-vision-instruct:free" # 6. Phi (Microsoft) - Very reliable
+        "qwen/qwen-2.5-vl-72b-instruct:free",    # 1. High Accuracy
+        "meta-llama/llama-3.2-11b-vision-instruct:free", # 2. Llama
+        "microsoft/phi-3.5-vision-instruct:free", # 3. Phi
+        "google/gemini-2.0-flash-exp:free",      # 4. Fallback Google via OR
     ]
 
     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
 
     for model in models:
         try:
-            print(f"Trying Vision Model: {model}...")
+            print(f"Trying Layer 1 (OpenRouter): {model}...")
             completion = client.chat.completions.create(
                 extra_headers={"HTTP-Referer": SITE_URL, "X-Title": APP_NAME},
                 model=model,
@@ -84,27 +113,18 @@ def scan_with_openrouter(prompt, base64_img):
                     ]
                 }]
             )
-            # If we get here, it worked!
             return completion.choices[0].message.content, f"OpenRouter {model}"
         except Exception as e:
             err_str = str(e)
-            print(f"Model {model} failed. Reason: {err_str}")
-            
-            # IMPROVEMENT 1: Specific Error Handling
-            if "401" in err_str:
-                print("STOPPING: Your API Key is Invalid (401). Please check .env settings.")
-                break # Stop trying models if the key is wrong
-            
-            if "429" in err_str:
-                print(f"RATE LIMIT (429) on {model}. Switching to next model...")
-
+            print(f"Model {model} failed. Reason: {err_str[:50]}...")
+            if "401" in err_str: break 
             time.sleep(0.5)
             continue 
             
     return None, None
 
 # ==========================================
-# 1. DIAGNOSTIC ENDPOINT (Health Check)
+# 1. DIAGNOSTIC ENDPOINT
 # ==========================================
 @csrf_exempt 
 @api_view(['GET'])
@@ -113,38 +133,43 @@ def scan_with_openrouter(prompt, base64_img):
 def ai_status_check(request):
     results = {}
     
-    # 1. Check OpenRouter (Network & Key)
+    # Check Google Direct
+    if GOOGLE_KEY:
+        try:
+            genai.configure(api_key=GOOGLE_KEY)
+            m = genai.GenerativeModel('gemini-1.5-flash')
+            m.generate_content("Ping")
+            results["GoogleDirect"] = "SUCCESS"
+        except Exception as e: results["GoogleDirect"] = f"FAILED: {str(e)[:50]}"
+    else: results["GoogleDirect"] = "MISSING KEY"
+
+    # Check OpenRouter
     if OPENROUTER_KEY:
         try:
             client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
             client.chat.completions.create(
-                model="google/gemini-2.0-flash-exp:free", 
-                messages=[{"role": "user", "content": "Hi"}],
-                extra_headers={"HTTP-Referer": SITE_URL, "X-Title": APP_NAME}
+                model="microsoft/phi-3.5-vision-instruct:free", 
+                messages=[{"role": "user", "content": "Hi"}]
             )
             results["OpenRouter"] = "SUCCESS"
         except Exception as e:
-            # 429 means "Busy" but Key is Valid -> SUCCESS
-            if "429" in str(e): results["OpenRouter"] = "SUCCESS (Rate Limited but Connected)"
+            if "429" in str(e): results["OpenRouter"] = "SUCCESS (Rate Limited)"
             else: results["OpenRouter"] = f"Warning: {str(e)[:50]}"
     else: results["OpenRouter"] = "MISSING KEY"
 
-    # 2. Check Hugging Face (Account Validation ONLY)
+    # Check HF (Account Only)
     if HF_KEY:
         try:
-            headers = {"Authorization": f"Bearer {HF_KEY}"}
-            # 'whoami' is the only guaranteed free endpoint
-            r = requests.get("https://huggingface.co/api/whoami-v2", headers=headers, timeout=5)
+            r = requests.get("https://huggingface.co/api/whoami-v2", headers={"Authorization": f"Bearer {HF_KEY}"})
             if r.status_code == 200: results["HuggingFace"] = "SUCCESS"
-            elif r.status_code == 401: results["HuggingFace"] = "FAILED: Invalid API Key"
             else: results["HuggingFace"] = f"FAILED: {r.status_code}"
-        except Exception as e: results["HuggingFace"] = "FAILED: Connection Error"
+        except: results["HuggingFace"] = "FAILED: Connection"
     else: results["HuggingFace"] = "MISSING KEY"
 
     return Response(results)
 
 # ==========================================
-# 2. ROSTER SCANNER (Stable - OpenRouter Only)
+# 2. ROSTER SCANNER (Google -> OpenRouter)
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):
@@ -160,59 +185,48 @@ class AnalyzeRosterView(APIView):
         prompt = """
         Read this timetable image.
         Output JSON ONLY.
-        Format:
-        {
-          "weekly_schedule": {
-            "Monday": [{"time": "HH:MM", "event": "Class Name"}]
-          }
-        }
-        Use 24-hour format (e.g. 14:00) if possible.
-        If unsure, list detected classes under Monday.
+        Format: { "weekly_schedule": { "Monday": [{"time": "HH:MM", "event": "Name"}] } }
+        Sort by time. If unsure, list under Monday.
         """
 
         print("--- STARTING SCAN ---")
 
-        # ONLY use OpenRouter (Reliable Vision Swarm)
-        data, source = scan_with_openrouter(prompt, base64_img)
+        # 1. TRY GOOGLE DIRECT (Best Chance)
+        data, source = scan_with_google_direct(prompt, base64_img)
+
+        # 2. TRY OPENROUTER SWARM (Backup)
+        if not data:
+            data, source = scan_with_openrouter(prompt, base64_img)
 
         print(f"DEBUG: Source used: {source}")
         
-        # If ALL models failed (Network or Rate Limits)
         if not data:
-             return Response({"error": "AI Service Busy. Please try again in 1 minute."}, status=503)
+             return Response({"error": "All AI Services Busy. Try again in 1 min."}, status=503)
 
-        # Process Success
         try:
             json_data = safe_json_extract(data)
-            
-            # Ensure valid structure for Frontend
             if json_data:
                 if "weekly_schedule" not in json_data:
                     json_data = {"weekly_schedule": json_data}
                 
-                # Normalize keys (Monday-Sunday) to be safe
                 days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
                 for d in days:
                     if d not in json_data["weekly_schedule"]:
                         json_data["weekly_schedule"][d] = []
                 
-                # IMPROVEMENT 2: Sort events by time
+                # Sort events
                 for day, events in json_data["weekly_schedule"].items():
                     if isinstance(events, list):
-                        try:
-                            # Sorts "09:00" before "10:00"
-                            events.sort(key=lambda x: x.get("time", ""))
-                        except Exception:
-                            pass
+                        events.sort(key=lambda x: x.get("time", ""))
 
                 json_data['ai_source'] = source
                 return Response(json_data)
 
-            # Fallback: Text found but JSON parsing failed
+            # Raw Fallback
             clean_text = str(data)[:200].replace('"', '')
             return Response({
                 "weekly_schedule": {
-                    "Monday": [{"time": "See Details", "event": f"Raw: {clean_text}..."}],
+                    "Monday": [{"time": "Info", "event": f"Raw: {clean_text}..."}],
                     "Tuesday": [], "Wednesday": [], "Thursday": [], "Friday": [], "Saturday": [], "Sunday": []
                 },
                 "ai_source": f"{source} (Raw Mode)"
@@ -220,7 +234,7 @@ class AnalyzeRosterView(APIView):
 
         except Exception as e:
             print(f"Parsing Error: {e}")
-            return Response({"error": "Failed to parse timetable."}, status=500)
+            return Response({"error": "Failed to parse result."}, status=500)
 
 # ==========================================
 # 3. STANDARD VIEWS
@@ -243,7 +257,14 @@ def ask_nutritionist(request):
     q = request.data.get('question')
     if not q: return Response({"error": "No question"}, 400)
     try:
-        # Use simple text model for Q&A
+        # Prefer Google for Q&A (Faster)
+        if GOOGLE_KEY:
+            genai.configure(api_key=GOOGLE_KEY)
+            m = genai.GenerativeModel('gemini-1.5-flash')
+            resp = m.generate_content(q)
+            return Response({"answer": resp.text})
+        
+        # Fallback to OpenRouter
         client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
         resp = client.chat.completions.create(
             model="google/gemini-2.0-flash-exp:free", 
@@ -265,8 +286,10 @@ class ScanFoodView(APIView):
         b64 = encode_image(img)
         prompt = """Identify food. JSON: { "food_name": "...", "estimated_calories": 0, "protein": 0, "carbs": 0, "fat": 0 }"""
         
-        # Use OpenRouter Swarm
-        data, source = scan_with_openrouter(prompt, b64)
+        # 1. Google Direct
+        data, source = scan_with_google_direct(prompt, b64)
+        # 2. OpenRouter Fallback
+        if not data: data, source = scan_with_openrouter(prompt, b64)
         
         if data:
             try:
