@@ -1,7 +1,11 @@
 import 'dart:io';
+import 'dart:convert'; // For jsonDecode
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'services/api_service.dart'; 
+import 'package:http/http.dart' as http; // For manual API call
+import 'package:crypto/crypto.dart'; // For Hashing
+import 'package:hive/hive.dart'; // For Cache
+import '../services/api_service.dart'; 
 
 class MealLogScreen extends StatefulWidget {
   const MealLogScreen({super.key});
@@ -34,7 +38,7 @@ class _MealLogScreenState extends State<MealLogScreen> {
       
       setState(() {
         _mealHistory = foods.map((food) => {
-          "id": food['id'], // We need ID to delete it
+          "id": food['id'], 
           "description": food['name'],
           "calories": food['calories'],
           "macros": {
@@ -54,10 +58,10 @@ class _MealLogScreenState extends State<MealLogScreen> {
     }
   }
 
-  // --- 2. DELETE FUNCTION (NEW) ---
+ 
+  // --- 2. DELETE FUNCTION ---
   Future<void> _deleteMeal(int id, int index) async {
     // 1. Remove from screen immediately (Optimistic UI)
-    final deletedItem = _mealHistory[index];
     setState(() {
       _mealHistory.removeAt(index);
       _calculateTotals();
@@ -66,12 +70,12 @@ class _MealLogScreenState extends State<MealLogScreen> {
     // 2. Tell Server to delete
     try {
       await ApiService.deleteFood(id);
-      
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Meal deleted."), duration: Duration(seconds: 1)),
-      );
+      if(mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Meal deleted."), duration: Duration(seconds: 1)),
+        );
+      }
     } catch (e) {
-      // If server fails, we could put it back, but for now let's just keep it deleted locally
       print("Could not delete from server: $e");
     }
   }
@@ -95,25 +99,97 @@ class _MealLogScreenState extends State<MealLogScreen> {
     });
   }
 
-  // --- 3. CAMERA SCANNER ---
+  // --- 3. SMART CAMERA SCANNER (With Caching) ---
   Future<void> _pickImage(ImageSource source) async {
     final picker = ImagePicker();
     final pickedFile = await picker.pickImage(source: source);
     
     if (pickedFile != null) {
       setState(() => _isLoading = true);
+      
       try {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("AI Analyzing Food... Please wait.")),
-        );
-        
-        await ApiService.scanFood(File(pickedFile.path));
-        await _fetchFoodHistory(); // Reload list
-        
+        File imageFile = File(pickedFile.path);
+        final bytes = await imageFile.readAsBytes();
+
+        // A. CALCULATE HASH (Fingerprint)
+        final hash = sha1.convert(bytes).toString();
+        final cacheBox = Hive.box('food_cache'); // Assumes box opened in main.dart
+
+        Map<String, dynamic>? foodData;
+
+        // B. CHECK CACHE
+        if (cacheBox.containsKey(hash)) {
+          print("⚡ CACHE HIT: Loading from local storage");
+          final cachedMap = Map<String, dynamic>.from(cacheBox.get(hash));
+          foodData = cachedMap;
+          
+          if(mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+               const SnackBar(content: Text("Loaded from Cache (Zero Cost!)"), backgroundColor: Colors.green),
+            );
+          }
+        } else {
+          // C. CACHE MISS -> CALL SERVER
+          print("🌐 CACHE MISS: Calling API...");
+          if(mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text("AI Analyzing Food... Please wait.")),
+            );
+          }
+
+          // Manual Multipart Request (Inlined to control caching)
+          var uri = Uri.parse("https://nutrichoice-xvpf.onrender.com/api/scan-food/");
+          var request = http.MultipartRequest('POST', uri);
+          request.files.add(http.MultipartFile.fromBytes('image', bytes, filename: 'scan.jpg'));
+
+          var response = await request.send();
+          
+          if (response.statusCode == 200) {
+             var responseBody = await response.stream.bytesToString();
+             var jsonResponse = json.decode(responseBody);
+             
+             if (jsonResponse['saved_data'] != null) {
+               foodData = jsonResponse['saved_data'];
+               // D. SAVE TO CACHE
+               await cacheBox.put(hash, foodData);
+               print("💾 Saved to Cache: $hash");
+             }
+          } else {
+            throw Exception("Server Error: ${response.statusCode}");
+          }
+        }
+
+        // E. UPDATE UI WITH RESULT
+        if (foodData != null) {
+          // Normalize data for UI
+          final newMeal = {
+            "id": foodData['id'] ?? 0, // ID might be missing if cached only, but that's okay for UI
+            "description": foodData['food_name'] ?? "Unknown",
+            "calories": foodData['estimated_calories'] ?? 0,
+            "macros": {
+              "protein": foodData['protein'] ?? 0,
+              "carbs": foodData['carbs'] ?? 0,
+              "fat": foodData['fat'] ?? 0,
+            },
+          };
+
+          setState(() {
+            _mealHistory.insert(0, newMeal); // Add to top of list
+            _calculateTotals();
+          });
+          
+          // Optional: Refresh full history to ensure ID sync if it was a fresh server scan
+          if (!cacheBox.containsKey(hash)) {
+             await _fetchFoodHistory(); 
+          }
+        }
+
       } catch (e) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Scan Failed: $e")));
+        if(mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Scan Failed: $e")));
+        }
       } finally {
-        setState(() => _isLoading = false);
+        if(mounted) setState(() => _isLoading = false);
       }
     }
   }
@@ -191,7 +267,7 @@ class _MealLogScreenState extends State<MealLogScreen> {
                         itemBuilder: (context, index) {
                           final log = _mealHistory[index];
                           final macros = log['macros'];
-                          final int id = log['id'] ?? 0; // Get ID for deleting
+                          final int id = log['id'] ?? 0;
 
                           return Card(
                             color: Colors.grey.shade900,
@@ -218,7 +294,7 @@ class _MealLogScreenState extends State<MealLogScreen> {
                                       
                                       const SizedBox(width: 10),
                                       
-                                      // --- DELETE BUTTON (NEW) ---
+                                      // DELETE BUTTON
                                       IconButton(
                                         icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
                                         onPressed: () => _deleteMeal(id, index),

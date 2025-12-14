@@ -2,27 +2,27 @@ import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:hive_flutter/hive_flutter.dart';
-import 'package:hive/hive.dart'; // Explicitly importing Hive
-// Make sure this points to your Dashboard file
+import 'package:hive/hive.dart';
 
-// Assuming you have these files:
 import 'onboarding_screen.dart';
-import 'dashboard.dart'; // <--- NEW: Assuming you have a Dashboard screen
+import 'dashboard.dart'; 
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 1. Start Local Database (Fast & Free)
+  // 1. Start Local Database
   await Hive.initFlutter();
   
-  // NOTE: Only open the 'settings' box now, as it's critical for the ternary check.
-  // Other boxes (meals, roster) will be opened lazily when their screens load.
-  await Hive.openBox('settings');
+  // Open the settings box
+  var box = await Hive.openBox('settings');
+
+  // --- 🛠️ TEMPORARY FIX: UNCOMMENT THIS LINE, RUN APP ONCE, THEN DELETE IT ---
+        await box.put('onboarding_complete', true); 
+  // --------------------------------------------------------------------------
   
-  // 2. Start Firebase (Analytics & Crash Tracking)
+  // 2. Start Firebase
   try {
     await Firebase.initializeApp();
-    // Pass all uncaught "fatal" errors from the framework to Crashlytics
     FlutterError.onError = FirebaseCrashlytics.instance.recordFlutterError;
   } catch (e) {
     print("⚠️ Firebase Warning: $e");
@@ -36,8 +36,8 @@ class BioSyncApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Check the Hive box for the onboarding status
     final settingsBox = Hive.box('settings');
+    // Reads the flag. If it was saved as true (by the fix above), it returns true.
     final bool onboardingComplete = settingsBox.get('onboarding_complete', defaultValue: false);
 
     return MaterialApp(
@@ -47,21 +47,9 @@ class BioSyncApp extends StatelessWidget {
         primaryColor: Colors.teal,
         scaffoldBackgroundColor: Colors.black,
       ),
-      
-      // --- TERNARY CONDITION FOR INITIAL SCREEN ---
       home: onboardingComplete 
-          ? const DashboardScreen() // Go straight to Dashboard if complete
-          : const OnboardingScreen(), // Show Onboarding if first launch
+          ? const DashboardScreen() 
+          : const OnboardingScreen(),
     );
   }
 }
-
-// NOTE: You must now update your OnboardingScreen to save 'onboarding_complete': true
-// For example, in the OnboardingScreen's final step:
-/*
-  void completeOnboarding() {
-    final settingsBox = Hive.box('settings');
-    settingsBox.put('onboarding_complete', true);
-    // Navigate to DashboardScreen
-  }
-*/
