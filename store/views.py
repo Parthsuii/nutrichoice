@@ -13,6 +13,7 @@ import base64
 import json
 import time
 import requests 
+import re # <--- ADDED THIS FOR REGEX CLEANING
 
 # --- HYBRID LIBRARIES ---
 from openai import OpenAI  # For OpenRouter
@@ -25,7 +26,7 @@ from .serializers import FoodItemSerializer, UserProfileSerializer
 # --- CONFIGURATION ---
 OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")
 HF_KEY = os.environ.get("HUGGINGFACE_API_KEY")
-GOOGLE_KEY = os.environ.get("GOOGLE_API_KEY") # <--- NEW KEY
+GOOGLE_KEY = os.environ.get("GOOGLE_API_KEY") 
 
 SITE_URL = "https://nutrichoice.onrender.com"
 APP_NAME = "NutriChoice"
@@ -35,21 +36,32 @@ def encode_image(image_file):
     image_file.seek(0)
     return base64.b64encode(image_file.read()).decode('utf-8')
 
-# --- HELPER: Robust JSON Extraction ---
+# --- HELPER: Robust JSON Extraction (UPDATED) ---
 def safe_json_extract(text):
-    """Finds the first '{' and last '}' to isolate JSON from AI chatter."""
+    """Robust extraction that fixes 'lazy' JSON (missing quotes) using Regex."""
     if not text: return None
+    
+    # 1. Strip Markdown code blocks
+    text = re.sub(r"```[a-z]*", "", text).replace("```", "").strip()
+    
     try:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1:
-            return json.loads(text[start:end+1])
-    except Exception:
-        pass
-    try:
-        clean = text.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
+        # 2. Attempt standard parsing first
+        return json.loads(text)
     except:
+        pass
+
+    try:
+        # 3. FIX: Add quotes to unquoted keys (e.g., { key: value } -> { "key": value })
+        # Pattern: Find word followed by colon, NOT already quoted
+        fixed_text = re.sub(r'(?<!")(\b\w+\b)(?=\s*:)', r'"\1"', text)
+        
+        # 4. FIX: Add quotes to unquoted string values (e.g., "event": ROBO -> "event": "ROBO")
+        # Pattern: "key": value (where value is text, starts with letter, and no quotes)
+        fixed_text = re.sub(r'(:\s*)([a-zA-Z_]\w*)(?=\s*[,}])', r'\1"\2"', fixed_text)
+
+        return json.loads(fixed_text)
+    except Exception as e:
+        print(f"JSON Repair Failed: {e}")
         return None
 
 # =========================================================================
@@ -182,11 +194,15 @@ class AnalyzeRosterView(APIView):
         image_file = request.FILES['file']
         base64_img = encode_image(image_file)
         
+        # UPDATED PROMPT: Strict JSON to avoid lazy formatting
         prompt = """
-        Read this timetable image.
-        Output JSON ONLY.
-        Format: { "weekly_schedule": { "Monday": [{"time": "HH:MM", "event": "Name"}] } }
-        Sort by time. If unsure, list under Monday.
+        Analyze this timetable.
+        Output STRICT VALID JSON only. 
+        Rules:
+        1. Use double quotes for ALL keys and string values (e.g. "time": "10:00").
+        2. Format: { "weekly_schedule": { "Monday": [{"time": "10:00", "event": "Math"}] } }
+        3. If multiple classes exist in one slot, list them separately.
+        4. Do not include comments or trailing commas.
         """
 
         print("--- STARTING SCAN ---")
@@ -204,7 +220,9 @@ class AnalyzeRosterView(APIView):
              return Response({"error": "All AI Services Busy. Try again in 1 min."}, status=503)
 
         try:
+            # Use updated robust extractor
             json_data = safe_json_extract(data)
+            
             if json_data:
                 if "weekly_schedule" not in json_data:
                     json_data = {"weekly_schedule": json_data}
@@ -217,7 +235,9 @@ class AnalyzeRosterView(APIView):
                 # Sort events
                 for day, events in json_data["weekly_schedule"].items():
                     if isinstance(events, list):
-                        events.sort(key=lambda x: x.get("time", ""))
+                        try:
+                            events.sort(key=lambda x: str(x.get("time", "")))
+                        except: pass
 
                 json_data['ai_source'] = source
                 return Response(json_data)
