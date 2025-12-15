@@ -3,6 +3,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
+from rest_framework import serializers
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.contrib.auth.models import User
@@ -57,7 +58,7 @@ def safe_json_extract(text):
     except: return None
 
 # =========================================================================
-# SMART SCANNER (Robust Model Fallback)
+# SMART SCANNER (Upgraded to Gemini 2.0)
 # =========================================================================
 @method_decorator(csrf_exempt, name='dispatch')
 class ScanFoodView(APIView):
@@ -81,12 +82,13 @@ class ScanFoodView(APIView):
             b64 = encode_image(image_file)
             prompt = """Analyze this food. Return STRICT JSON: { "food_name": "Paneer", "estimated_calories": 300, "protein": 10, "carbs": 20, "fat": 15, "ingredients": ["paneer"], "confidence_score": 90 }"""
             
-            # TRY GOOGLE VISION (Loop through known working models)
             if GOOGLE_KEY:
-                # 1. Try Exact Version (Safest)
-                # 2. Try Alias (Standard)
-                # 3. Try Pro Vision (Legacy backup)
-                models_to_try = ['gemini-1.5-flash-001', 'gemini-1.5-flash', 'gemini-pro-vision']
+                # PRIORITY LIST: 2.0 Flash -> 1.5 Flash -> 1.5 Flash-8b
+                models_to_try = [
+                    'gemini-2.0-flash-exp',   # <--- NEWEST (Fastest & Smartest)
+                    'gemini-1.5-flash',       # Stable Standard
+                    'gemini-1.5-flash-8b',    # Ultra-fast backup
+                ]
                 
                 genai.configure(api_key=GOOGLE_KEY)
                 
@@ -98,31 +100,30 @@ class ScanFoodView(APIView):
                         if res.text:
                             data = safe_json_extract(res.text)
                             source_used = f"Google Vision ({model_name})"
-                            break # Success! Stop trying other models
+                            break 
                     except Exception as e:
-                        print(f"Failed {model_name}: {e}")
+                        print(f"Failed {model_name}: {str(e)[:100]}") # Print short error
                         continue 
 
-            # OPENROUTER FALLBACK (If all Google models fail)
+            # OPENROUTER FALLBACK
             if not data and OPENROUTER_KEY:
                 try:
                     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
                     res = client.chat.completions.create(
-                        model="google/gemini-2.0-flash-exp:free",
+                        model="google/gemini-2.0-flash-exp:free", # OpenRouter also has 2.0
                         messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
                     )
                     data = safe_json_extract(res.choices[0].message.content)
-                    source_used = "OpenRouter Vision"
+                    source_used = "OpenRouter Vision (Gemini 2.0)"
                 except: pass
 
         # ---------------------------------------------------------
-        # PATH B: TEXT ONLY (Robust)
+        # PATH B: TEXT ONLY
         # ---------------------------------------------------------
         elif text_query:
             food_name_normalized = normalize_food_name(str(text_query))
             print(f"🔍 TEXT SCAN: Checking '{food_name_normalized}'...")
 
-            # 1. Check Cache
             cached = FoodKnowledge.objects.filter(name__iexact=food_name_normalized).first()
             if cached:
                 print(f"⚡ CACHE HIT: {cached.name}")
@@ -138,14 +139,13 @@ class ScanFoodView(APIView):
                     "source": "Local Knowledge Base"
                 })
 
-            # 2. Call AI (Try Multiple Google Models)
             print("🌐 CACHE MISS: Calling Text AI...")
             prompt = f"Analyze '{food_name_normalized}'. Return JSON: {{ \"food_name\": \"{food_name_normalized}\", \"estimated_calories\": 0, \"protein\": 0, \"carbs\": 0, \"fat\": 0, \"ingredients\": [] }}"
             
             if GOOGLE_KEY:
-                # Text models to try (Flash is best, Pro is backup)
-                text_models = ['gemini-1.5-flash-001', 'gemini-1.5-flash', 'gemini-pro']
                 genai.configure(api_key=GOOGLE_KEY)
+                # Same Priority for Text
+                text_models = ['gemini-2.0-flash-exp', 'gemini-1.5-flash']
                 
                 for model_name in text_models:
                     try:
@@ -156,13 +156,9 @@ class ScanFoodView(APIView):
                         if data:
                             source_used = f"Google Text ({model_name})"
                             break
-                    except Exception as e:
-                        print(f"Text Model {model_name} failed: {e}")
-                        continue
+                    except: continue
 
-            # 3. Call AI (OpenRouter Fallback)
             if not data and OPENROUTER_KEY:
-                print("🔄 Google Failed. Trying OpenRouter Text...")
                 try:
                     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
                     res = client.chat.completions.create(
@@ -172,7 +168,7 @@ class ScanFoodView(APIView):
                     data = safe_json_extract(res.choices[0].message.content)
                     source_used = "OpenRouter Text"
                 except Exception as e: 
-                    # SOFT LANDING
+                    # Soft Landing
                     data = {
                         "food_name": food_name_normalized.title(),
                         "estimated_calories": 0, "protein": 0, "carbs": 0, "fat": 0, "ingredients": [], "confidence_score": 0
@@ -235,10 +231,9 @@ class AnalyzeRosterView(APIView):
         b64 = encode_image(img)
         prompt = """Analyze timetable. JSON: { "weekly_schedule": { "Monday": [{"time": "10:00", "event": "Math"}] } }"""
         
-        # Try multiple models for Roster too
         if GOOGLE_KEY:
             genai.configure(api_key=GOOGLE_KEY)
-            for m_name in ['gemini-1.5-flash-001', 'gemini-1.5-flash', 'gemini-pro-vision']:
+            for m_name in ['gemini-2.0-flash-exp', 'gemini-1.5-flash']:
                 try:
                     m = genai.GenerativeModel(m_name)
                     r = m.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt])
@@ -273,7 +268,7 @@ def ask_nutritionist(request):
     try:
         if GOOGLE_KEY:
             genai.configure(api_key=GOOGLE_KEY)
-            m = genai.GenerativeModel('gemini-1.5-flash-001')
+            m = genai.GenerativeModel('gemini-2.0-flash-exp') # Use 2.0 for Chat too
             return Response({"answer": m.generate_content(q).text})
     except: return Response({"error": "AI Error"}, 500)
 
