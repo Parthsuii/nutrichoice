@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'services/api_service.dart'; // <--- USES YOUR CENTRAL SERVICE
+import '../services/api_service.dart'; 
 
 class SmartMealPlannerScreen extends StatefulWidget {
   const SmartMealPlannerScreen({super.key});
@@ -14,8 +14,6 @@ class SmartMealPlannerScreen extends StatefulWidget {
 class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
   bool _isLoading = false;
   List<dynamic> _meals = [];
-  String _chefAnalysis = "";
-
   String _userGoal = "Maintain";
   int _dailyCalories = 2000;
 
@@ -38,82 +36,48 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
     _loadOrGeneratePlan();
   }
 
-  // --- 1. SMART LOAD LOGIC ---
+  // --- 1. LOAD OR GENERATE LOGIC ---
   Future<void> _loadOrGeneratePlan() async {
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
 
-    String todayDate = DateTime.now().toIso8601String().split('T')[0];
-    String? savedDate = prefs.getString('saved_plan_date');
-    String? savedMeals = prefs.getString('saved_plan_json');
-
-    if (savedDate == todayDate && savedMeals != null) {
-      List<dynamic> loadedMeals = jsonDecode(savedMeals);
-      bool isOldVersion = loadedMeals.isNotEmpty && (loadedMeals[0]['recipe'] == null);
-
-      if (isOldVersion) {
-        _initPlannerLogic();
-      } else {
-        setState(() {
-          _meals = loadedMeals;
-          _selectedContext = prefs.getString('saved_plan_context') ?? "Standard Day";
-          _chefAnalysis = prefs.getString('saved_plan_analysis') ?? "";
-          _isLoading = false;
-        });
-        _userGoal = prefs.getString('user_goal') ?? "Maintain";
-        _dailyCalories = prefs.getInt('daily_calorie_target') ?? 2000;
-      }
-    } else {
-      _initPlannerLogic();
-    }
-  }
-
-  Future<void> _initPlannerLogic() async {
-    final prefs = await SharedPreferences.getInstance();
-    int reflexScore = prefs.getInt('last_reflex_score') ?? 0;
-    double sleepHours = prefs.getDouble('last_sleep_hours') ?? 7.0;
-    String scheduleText = prefs.getString('saved_schedule_text') ?? "";
-
-    String detectedContext = "Standard Day";
-    if (sleepHours < 6.0 || (reflexScore > 350 && reflexScore > 0)) {
-      detectedContext = "Rest / Recovery 🛌";
-    } else if (scheduleText.toLowerCase().contains("exam")) {
-      detectedContext = "Exam / High Focus 🧠";
-    } else if (reflexScore > 0 && reflexScore < 250) {
-      detectedContext = "Heavy Lifting 🏋️";
-    }
-
-    if (!mounted) return;
-
+    // Load User Stats
     setState(() {
       _userGoal = prefs.getString('user_goal') ?? "Maintain";
       int dynamicCal = prefs.getInt('dynamic_calorie_target') ?? 0;
       int baseCal = prefs.getInt('daily_calorie_target') ?? 2000;
       _dailyCalories = (dynamicCal > baseCal) ? dynamicCal : baseCal;
-      _selectedContext = detectedContext;
     });
 
-    _generateFullPlan();
+    String todayDate = DateTime.now().toIso8601String().split('T')[0];
+    String? savedDate = prefs.getString('saved_plan_date');
+    String? savedMeals = prefs.getString('saved_plan_json');
+
+    // If we have a plan for TODAY, load it. Otherwise, generate new.
+    if (savedDate == todayDate && savedMeals != null) {
+      print("📅 Loading saved plan for today...");
+      setState(() {
+        _meals = jsonDecode(savedMeals);
+        _selectedContext = prefs.getString('saved_plan_context') ?? "Standard Day";
+      });
+    } else {
+      print("🧠 Generating NEW AI Plan...");
+      _generateFullPlan();
+    }
   }
 
-  // --- 2. GENERATE NEW PLAN (Updated to use ApiService) ---
+  // --- 2. CALL BACKEND (Generate) ---
   Future<void> _generateFullPlan() async {
     setState(() => _isLoading = true);
     
     try {
       final prefs = await SharedPreferences.getInstance();
-      List<String> soreMuscles = prefs.getStringList('sore_muscles') ?? [];
       
-      String finalContext = _selectedContext;
-      if (soreMuscles.isNotEmpty) {
-        finalContext += ". USER SORE IN: ${soreMuscles.join(', ')}. ADD ANTI-INFLAMMATORY FOODS.";
-      }
-
       // CALL API SERVICE
       final data = await ApiService.generateMealPlan(
         goal: _userGoal,
         calories: _dailyCalories,
-        context: finalContext,
+        context: _selectedContext,
         ingredients: _availableIngredients,
       );
 
@@ -122,38 +86,46 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
       if (data['meals'] != null) {
         setState(() {
           _meals = data['meals'];
-          _chefAnalysis = data['analysis'] ?? "Here is your plan.";
           _isLoading = false;
         });
 
+        // Save to Local Storage (Cache)
         String todayDate = DateTime.now().toIso8601String().split('T')[0];
         await prefs.setString('saved_plan_date', todayDate);
         await prefs.setString('saved_plan_json', jsonEncode(_meals));
         await prefs.setString('saved_plan_context', _selectedContext);
-        await prefs.setString('saved_plan_analysis', _chefAnalysis);
+      } else {
+         // Handle empty response
+         setState(() => _isLoading = false);
+         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("AI is busy. Try again.")));
       }
     } catch (e) {
       if (!mounted) return;
+      print("Plan Error: $e");
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));
       setState(() => _isLoading = false);
     }
   }
 
-  // --- 3. SWAP MEAL LOGIC (Updated to use ApiService) ---
+  // --- 3. CALL BACKEND (Swap Meal) ---
   Future<void> _swapSingleMeal(int index) async {
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Swapping meal...")));
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Chef is cooking up a swap...")));
     try {
+      final oldMealName = _meals[index]['name'] ?? "Meal";
+      final targetCals = _meals[index]['calories'] ?? 500;
+
       // CALL API SERVICE
       final newMeal = await ApiService.swapMeal(
-        goal: _userGoal,
-        calories: _dailyCalories,
+        goal: oldMealName, // Passing old name as context
+        calories: targetCals,
         context: _selectedContext,
       );
 
       if (!mounted) return;
 
       setState(() {
-        newMeal['type'] = _meals[index]['type']; // Keep Breakfast/Lunch tag
+        // Keep the old time/type, update content
+        newMeal['time'] = _meals[index]['time']; 
         _meals[index] = newMeal;
       });
       
@@ -166,6 +138,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
     }
   }
 
+  // Blinkit / Grocery Link
   Future<void> _checkPrice(String ingredient) async {
     String query = ingredient.replaceAll(" ", "%20");
     Uri url = Uri.parse("https://blinkit.com/s/?q=$query");
@@ -203,13 +176,13 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text("Context Chef"),
+        title: const Text("Context Chef AI"),
         backgroundColor: Colors.teal.shade900,
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: () {
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Regenerating...")));
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Regenerating Plan...")));
               _generateFullPlan();
             },
           )
@@ -226,29 +199,38 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
 
       body: Column(
         children: [
-          // CONTEXT SECTION
+          // 1. CONTEXT & PANTRY SECTION
           Container(
             padding: const EdgeInsets.all(16),
-            color: Colors.grey.shade900,
+            decoration: BoxDecoration(
+                color: Colors.grey.shade900,
+                border: Border(bottom: BorderSide(color: Colors.teal.shade900))
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // Dropdown
                 DropdownButtonFormField<String>(
-                  initialValue: _selectedContext,
+                  value: _contextOptions.contains(_selectedContext) ? _selectedContext : _contextOptions[0],
                   dropdownColor: Colors.grey.shade800,
                   style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
                   decoration: const InputDecoration(
-                    labelText: "Bio-Sync Mode", 
+                    labelText: "Today's Context", 
                     labelStyle: TextStyle(color: Colors.teal),
-                    border: OutlineInputBorder()
+                    border: OutlineInputBorder(),
+                    enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
                   ),
                   items: _contextOptions.map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
                   onChanged: (val) {
                     setState(() => _selectedContext = val!);
+                    // Auto-regenerate when context changes
                     _generateFullPlan();
                   },
                 ),
+                
                 const SizedBox(height: 10),
+                
+                // Ingredient Input
                 Row(
                   children: [
                     Expanded(
@@ -256,141 +238,132 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
                         controller: _ingredientController,
                         style: const TextStyle(color: Colors.white),
                         decoration: const InputDecoration(
-                          hintText: "Add pantry item (e.g. Eggs)",
+                          hintText: "Add pantry item (e.g. Paneer)",
                           hintStyle: TextStyle(color: Colors.grey),
                           isDense: true,
+                          contentPadding: EdgeInsets.symmetric(vertical: 12, horizontal: 10),
+                          filled: true,
+                          fillColor: Colors.black26,
+                          border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(8))),
                         ),
                         onSubmitted: (_) => _addIngredient(),
                       ),
                     ),
-                    IconButton(icon: const Icon(Icons.add, color: Colors.teal), onPressed: _addIngredient),
+                    IconButton(icon: const Icon(Icons.add_circle, color: Colors.teal, size: 30), onPressed: _addIngredient),
                   ],
                 ),
+                
+                // Chips
                 if (_availableIngredients.isNotEmpty)
-                  Wrap(
-                    spacing: 8,
-                    children: _availableIngredients.map((item) => Chip(
-                      label: Text(item),
-                      onDeleted: () => _removeIngredient(item),
-                      backgroundColor: Colors.teal.withOpacity(0.2),
-                      labelStyle: const TextStyle(color: Colors.white),
-                      deleteIconColor: Colors.redAccent,
-                    )).toList(),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8.0),
+                    child: Wrap(
+                      spacing: 8,
+                      children: _availableIngredients.map((item) => Chip(
+                        label: Text(item),
+                        onDeleted: () => _removeIngredient(item),
+                        backgroundColor: Colors.teal.withOpacity(0.2),
+                        labelStyle: const TextStyle(color: Colors.white),
+                        deleteIconColor: Colors.redAccent,
+                      )).toList(),
+                    ),
                   ),
               ],
             ),
           ),
 
-          // MEAL LIST
+          // 2. MEAL LIST
           Expanded(
             child: _isLoading 
-                ? const Center(child: CircularProgressIndicator(color: Colors.tealAccent)) 
-                : ListView.builder(
-                    padding: const EdgeInsets.all(16),
-                    itemCount: _meals.length,
-                    itemBuilder: (context, index) {
-                      final meal = _meals[index];
-                      final nutrients = meal['nutrients'] ?? {"protein": "N/A", "carbs": "N/A", "fat": "N/A"};
-                      final List<dynamic> recipeSteps = meal['recipe'] ?? ["No recipe steps provided."];
-                      final List<dynamic> ingredients = meal['ingredients'] ?? [];
-
-                      return Card(
-                        color: Colors.grey.shade900,
-                        margin: const EdgeInsets.only(bottom: 20),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(15), 
-                          side: BorderSide(color: Colors.teal.withOpacity(0.3))
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.all(16.0),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                ? Center(child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const CircularProgressIndicator(color: Colors.tealAccent),
+                      const SizedBox(height: 15),
+                      Text("Chef is planning your $_selectedContext...", style: const TextStyle(color: Colors.white70))
+                    ],
+                  )) 
+                : _meals.isEmpty 
+                    ? const Center(child: Text("No meals generated yet.", style: TextStyle(color: Colors.grey)))
+                    : ListView.builder(
+                        padding: const EdgeInsets.all(16),
+                        itemCount: _meals.length,
+                        itemBuilder: (context, index) {
+                          final meal = _meals[index];
+                          
+                          return Card(
+                            color: Colors.grey.shade900,
+                            margin: const EdgeInsets.only(bottom: 20),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(15), 
+                              side: BorderSide(color: Colors.teal.withOpacity(0.3))
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.all(16.0),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text(meal['type'] ?? "Meal", style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)),
-                                  Text("${meal['calories']} kcal", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                                ],
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                meal['name'] ?? "Unknown Dish", 
-                                style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)
-                              ),
-                              const SizedBox(height: 15),
-                              Container(
-                                padding: const EdgeInsets.symmetric(vertical: 10),
-                                decoration: BoxDecoration(
-                                  color: Colors.black38,
-                                  borderRadius: BorderRadius.circular(10),
-                                  border: Border.all(color: Colors.white10)
-                                ),
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                                  children: [
-                                    _nutrientBadge("PRO", "${nutrients['protein']}", Colors.blue),
-                                    _nutrientBadge("CARBS", "${nutrients['carbs']}", Colors.orange),
-                                    _nutrientBadge("FAT", "${nutrients['fat']}", Colors.red),
-                                  ],
-                                ),
-                              ),
-                              const SizedBox(height: 15),
-                              Wrap(
-                                spacing: 8,
-                                children: ingredients.map<Widget>((ing) {
-                                  return ActionChip(
-                                    label: Text(ing.toString(), style: const TextStyle(color: Colors.white)),
-                                    backgroundColor: Colors.deepPurple.shade900,
-                                    onPressed: () => _checkPrice(ing.toString()),
-                                    avatar: const Icon(Icons.shopping_cart, size: 12, color: Colors.white70),
-                                  );
-                                }).toList(),
-                              ),
-                              const SizedBox(height: 10),
-                              ExpansionTile(
-                                tilePadding: EdgeInsets.zero,
-                                title: const Text("👩‍🍳 View Recipe", style: TextStyle(color: Colors.white70, fontSize: 14)),
-                                children: [
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                        decoration: BoxDecoration(color: Colors.teal.withOpacity(0.2), borderRadius: BorderRadius.circular(5)),
+                                        child: Text(meal['time'] ?? "Meal", style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold, fontSize: 12)),
+                                      ),
+                                      Text("${meal['calories']} kcal", style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold)),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    meal['name'] ?? "Unknown Dish", 
+                                    style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)
+                                  ),
+                                  const SizedBox(height: 15),
+                                  
+                                  // Macros Row
                                   Container(
-                                    width: double.infinity,
-                                    padding: const EdgeInsets.all(12),
-                                    decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(8)),
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: recipeSteps.asMap().entries.map((entry) {
-                                        return Padding(
-                                          padding: const EdgeInsets.only(bottom: 8.0),
-                                          child: Row(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
-                                            children: [
-                                              Text("${entry.key + 1}. ", style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)),
-                                              Expanded(child: Text(entry.value.toString(), style: const TextStyle(color: Colors.grey))),
-                                            ],
-                                          ),
-                                        );
-                                      }).toList(),
+                                    padding: const EdgeInsets.symmetric(vertical: 10),
+                                    decoration: BoxDecoration(
+                                      color: Colors.black38,
+                                      borderRadius: BorderRadius.circular(10),
                                     ),
+                                    child: Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                                      children: [
+                                        _nutrientBadge("PRO", "${meal['protein']}g", Colors.blue),
+                                        _nutrientBadge("CARBS", "${meal['carbs']}g", Colors.orange),
+                                        _nutrientBadge("FAT", "${meal['fat']}g", Colors.red),
+                                      ],
+                                    ),
+                                  ),
+                                  
+                                  const SizedBox(height: 10),
+                                  
+                                  // Action Buttons
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.end,
+                                    children: [
+                                       TextButton.icon(
+                                         icon: const Icon(Icons.shopping_cart, size: 16, color: Colors.greenAccent),
+                                         label: const Text("Order Items", style: TextStyle(color: Colors.greenAccent)),
+                                         onPressed: () => _checkPrice(meal['name']),
+                                       ),
+                                       const SizedBox(width: 8),
+                                       OutlinedButton.icon(
+                                         icon: const Icon(Icons.swap_horiz, size: 16, color: Colors.white70),
+                                         label: const Text("Swap", style: TextStyle(color: Colors.white70)),
+                                         onPressed: () => _swapSingleMeal(index),
+                                         style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24)),
+                                       ),
+                                    ],
                                   )
                                 ],
                               ),
-                              const SizedBox(height: 10),
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: OutlinedButton(
-                                      onPressed: () => _swapSingleMeal(index),
-                                      child: const Text("Swap Meal"),
-                                    ),
-                                  ),
-                                ],
-                              )
-                            ],
-                          ),
-                        ),
-                      );
-                    },
-                  ),
+                            ),
+                          );
+                        },
+                      ),
           ),
         ],
       ),
@@ -401,7 +374,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
     return Column(
       children: [
         Text(value, style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 16)),
-        Text(label, style: const TextStyle(color: Colors.grey, fontSize: 9)),
+        Text(label, style: const TextStyle(color: Colors.grey, fontSize: 10)),
       ],
     );
   }
@@ -418,7 +391,7 @@ class ChefChatWidget extends StatefulWidget {
 class _ChefChatWidgetState extends State<ChefChatWidget> {
   final TextEditingController _chatController = TextEditingController();
   final List<Map<String, String>> _messages = [
-    {"role": "system", "content": "Hello! I am your AI Chef. Ask me about nutrition, recipes, or your meal plan!"}
+    {"role": "system", "content": "Hello! I am your AI Chef. Ask me about nutrition or recipes!"}
   ];
   bool _isTyping = false;
 
@@ -453,15 +426,16 @@ class _ChefChatWidgetState extends State<ChefChatWidget> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: MediaQuery.of(context).size.height * 0.7,
+      height: MediaQuery.of(context).size.height * 0.75,
       decoration: BoxDecoration(
         color: Colors.grey.shade900,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.5), blurRadius: 10)]
       ),
       child: Column(
         children: [
           Container(width: 40, height: 4, margin: const EdgeInsets.symmetric(vertical: 10), decoration: BoxDecoration(color: Colors.grey, borderRadius: BorderRadius.circular(2))),
-          const Text("Chat with Chef", style: TextStyle(color: Colors.tealAccent, fontSize: 18, fontWeight: FontWeight.bold)),
+          const Text("Chef AI", style: TextStyle(color: Colors.tealAccent, fontSize: 18, fontWeight: FontWeight.bold)),
           const Divider(color: Colors.grey),
           Expanded(
             child: ListView.builder(
@@ -475,11 +449,17 @@ class _ChefChatWidgetState extends State<ChefChatWidget> {
                   child: Container(
                     margin: const EdgeInsets.symmetric(vertical: 5),
                     padding: const EdgeInsets.all(12),
+                    constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.8),
                     decoration: BoxDecoration(
-                      color: isUser ? Colors.teal : Colors.grey.shade800,
-                      borderRadius: BorderRadius.circular(10),
+                      color: isUser ? Colors.teal.shade700 : Colors.grey.shade800,
+                      borderRadius: BorderRadius.only(
+                        topLeft: const Radius.circular(12),
+                        topRight: const Radius.circular(12),
+                        bottomLeft: isUser ? const Radius.circular(12) : Radius.zero,
+                        bottomRight: isUser ? Radius.zero : const Radius.circular(12),
+                      ),
                     ),
-                    child: Text(msg['content']!, style: const TextStyle(color: Colors.white)),
+                    child: Text(msg['content']!, style: const TextStyle(color: Colors.white, fontSize: 15)),
                   ),
                 );
               },
@@ -488,7 +468,7 @@ class _ChefChatWidgetState extends State<ChefChatWidget> {
           if (_isTyping)
             const Padding(
               padding: EdgeInsets.all(8.0),
-              child: Text("Chef is typing...", style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic)),
+              child: Text("Chef is thinking...", style: TextStyle(color: Colors.tealAccent, fontStyle: FontStyle.italic)),
             ),
           Padding(
             padding: EdgeInsets.only(left: 16, right: 16, top: 10, bottom: MediaQuery.of(context).viewInsets.bottom + 20),
@@ -499,18 +479,21 @@ class _ChefChatWidgetState extends State<ChefChatWidget> {
                     controller: _chatController,
                     style: const TextStyle(color: Colors.white),
                     decoration: InputDecoration(
-                      hintText: "Ask about food...",
+                      hintText: "Ask about a recipe...",
                       hintStyle: const TextStyle(color: Colors.grey),
                       filled: true,
                       fillColor: Colors.black,
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(30), borderSide: BorderSide.none),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                     ),
                     onSubmitted: (_) => _sendMessage(),
                   ),
                 ),
                 const SizedBox(width: 10),
-                CircleAvatar(backgroundColor: Colors.teal, child: IconButton(icon: const Icon(Icons.send, color: Colors.white), onPressed: _sendMessage))
+                CircleAvatar(
+                  backgroundColor: Colors.tealAccent, 
+                  child: IconButton(icon: const Icon(Icons.send, color: Colors.black), onPressed: _sendMessage)
+                )
               ],
             ),
           )

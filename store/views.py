@@ -7,7 +7,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.contrib.auth.models import User
 from django.conf import settings
-from django.utils import timezone 
+from django.utils import timezone # Core Django Timezone utils
 import os
 import base64
 import json
@@ -52,7 +52,7 @@ def safe_json_extract(text):
     except: return None
 
 # =========================================================================
-# SMART SCANNER (Debug Mode Enabled)
+# 1. SMART SCANNER (Failover: Google 2.0 -> OpenRouter -> Llama)
 # =========================================================================
 @method_decorator(csrf_exempt, name='dispatch')
 class ScanFoodView(APIView):
@@ -205,7 +205,7 @@ class ScanFoodView(APIView):
         return Response({"error": "AI Busy. Please enter food manually."}, 422)
 
 # =========================================================================
-# 5. SMART MEAL PLANNER
+# 2. SMART MEAL PLANNER (Context, Time & Recipe Aware)
 # =========================================================================
 @csrf_exempt
 @api_view(['POST'])
@@ -214,36 +214,85 @@ def generate_meal_plan(request):
     if not user: return Response({"error": "No user profile"}, 400)
     profile, _ = UserProfile.objects.get_or_create(user=user)
     
+    # 1. Get Context from App
+    context = request.data.get('activity_context', 'Standard Day')
+    ingredients = request.data.get('available_ingredients', [])
+    
+    # 2. Calculate Calories
     today = timezone.now().date()
+    
+    # --- TIMEZONE FIX ---
+    # Use Django's localtime() which respects settings.TIME_ZONE (Asia/Kolkata)
+    current_hour = timezone.localtime().hour 
+    
     eaten_today = FoodItem.objects.filter(created_at__date=today)
     total_eaten = sum(item.calories for item in eaten_today)
     remaining_cals = profile.daily_calorie_target - total_eaten
     
+    # 3. Handle End of Day
     if remaining_cals <= 0:
         return Response({
-            "message": "You hit your goal!", 
-            "meals": [{"name": "No more meals needed today", "calories": 0, "protein": 0, "carbs": 0, "fat": 0}]
+            "message": "Goal Hit!", 
+            "analysis": "You have hit your calorie target for the day!",
+            "meals": []
         })
 
+    # 4. Prompt Engineering (The Brains)
+    
+    # A. Time Logic
+    time_instruction = f"It is {current_hour}:00."
+    if current_hour > 21: time_instruction += " Late Night. Suggest only light milk/snacks."
+    elif current_hour > 15: time_instruction += " Lunch is over. Suggest Dinner & Snack."
+    elif current_hour < 11: time_instruction += " Morning. Suggest Lunch & Dinner."
+
+    # B. Context Logic
+    context_instruction = "Balanced Diet."
+    if "Lifting" in context: context_instruction = "High Protein for muscle recovery."
+    elif "Exam" in context: context_instruction = "Brain Food (Nuts, Omega-3). No sugar crash."
+    elif "Cardio" in context: context_instruction = "Electrolytes & Carbs."
+    elif "Rest" in context: context_instruction = "Low Carb, High Volume (Fiber)."
+
+    # C. Ingredient Logic
+    ingredient_instruction = ""
+    if ingredients:
+        ingredient_instruction = f"MUST use: {', '.join(ingredients)}."
+
     prompt = f"""
-    Act as a nutritionist. 
-    User Stats: Goal {profile.goal}, Remaining Calories: {remaining_cals}.
-    Diet: Indian, Balanced.
-    Task: Create a meal plan for the REST of the day to meet the {remaining_cals} kcal gap.
-    Suggest 2-3 specific meals.
-    Return STRICT JSON: {{ "meals": [ {{ "name": "Moong Dal Khichdi", "calories": 350, "protein": 12, "carbs": 45, "fat": 10, "time": "Dinner" }} ] }}
+    Act as an elite Indian Sports Nutritionist.
+    
+    USER: Goal {profile.goal}, Remaining {remaining_cals} kcal.
+    CONTEXT: {context_instruction}
+    TIME: {time_instruction}
+    PANTRY: {ingredient_instruction}
+    
+    TASK: Plan specific meals to fill the gap.
+    OUTPUT STRICT JSON:
+    {{
+      "analysis": "Brief reason for choices.",
+      "meals": [
+        {{ 
+           "name": "Dish Name", 
+           "calories": 0, "protein": 0, "carbs": 0, "fat": 0, 
+           "time": "Dinner",
+           "ingredients": ["Item1", "Item2"],
+           "recipe": ["Step 1", "Step 2", "Step 3"]
+        }}
+      ]
+    }}
     """
     
     plan_text = None
 
+    # ATTEMPT 1: Google Gemini 2.0
     if GOOGLE_KEY:
         try:
-            print("🍱 Planning with Gemini 2.0...")
+            print(f"🍱 Planning for {context} at {current_hour}:00...")
             genai.configure(api_key=GOOGLE_KEY)
             m = genai.GenerativeModel('gemini-2.0-flash-exp')
             plan_text = m.generate_content(prompt).text
         except: pass
 
+    # ATTEMPT 2: OpenRouter
     if not plan_text and OPENROUTER_KEY:
         try:
             print("🍱 Switching to OpenRouter...")
@@ -260,19 +309,28 @@ def generate_meal_plan(request):
         if data and "meals" in data:
             return Response(data)
 
+    # Fallback
     return Response({
+        "analysis": "Server busy, here is a standard plan.",
         "meals": [
-            { "name": "Oats with Milk (Fallback Plan)", "calories": 300, "protein": 10, "carbs": 40, "fat": 8, "time": "Anytime" },
-            { "name": "Green Salad", "calories": 100, "protein": 2, "carbs": 10, "fat": 0, "time": "Side" }
+            { 
+                "name": "Oats with Milk & Nuts", 
+                "calories": 300, "protein": 10, "carbs": 40, "fat": 8, "time": "Anytime",
+                "ingredients": ["Oats", "Milk", "Almonds"],
+                "recipe": ["Boil milk", "Add oats", "Cook 5 mins"]
+            }
         ]
     })
 
 @csrf_exempt
 @api_view(['POST'])
 def swap_meal(request):
-    old_meal = request.data.get('old_meal', 'Meal')
+    old_meal = request.data.get('goal', 'Meal') 
     calories = request.data.get('calories', 500)
-    prompt = f"Suggest ONE vegetarian Indian replacement for '{old_meal}' (~{calories} kcal). Return JSON: {{ \"name\": \"...\", \"calories\": {calories}, \"protein\": 0, \"carbs\": 0, \"fat\": 0 }}"
+    context = request.data.get('context', 'Standard')
+    
+    prompt = f"Suggest ONE vegetarian Indian replacement for '{old_meal}' (~{calories} kcal). Context: {context}. Return JSON: {{ \"name\": \"...\", \"calories\": {calories}, \"protein\": 0, \"carbs\": 0, \"fat\": 0, \"ingredients\": [], \"recipe\": [] }}"
+    
     try:
         if GOOGLE_KEY:
             genai.configure(api_key=GOOGLE_KEY)
@@ -281,10 +339,14 @@ def swap_meal(request):
             data = safe_json_extract(res.text)
             if data: return Response(data)
     except: pass
-    return Response({"name": "Oats Upma", "calories": calories, "protein": 8, "carbs": 40, "fat": 5})
+    
+    return Response({
+        "name": "Masala Oats", "calories": calories, "protein": 8, "carbs": 40, "fat": 5, 
+        "ingredients": ["Oats", "Spices"], "recipe": ["Boil water", "Add oats & spices"]
+    })
 
 # ==========================================
-# 6. ROSTER ANALYZER (With Pixtral Fallback)
+# 3. ROSTER ANALYZER (Failover: Gemini -> Pixtral)
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):
@@ -297,14 +359,12 @@ class AnalyzeRosterView(APIView):
         img = request.FILES['file']
         b64 = encode_image(img)
         
-        # Specialized Prompt for Timetables
         prompt = """
         Analyze this timetable/roster image. 
         Extract the schedule into strict JSON format.
         JSON Structure: { "weekly_schedule": { "Monday": [{"time": "10:00", "event": "Math"}], "Tuesday": [] } }
         If text is unclear, guess based on layout.
         """
-        
         data = None
 
         # 1. Try Google Direct (Gemini 2.0)
@@ -322,7 +382,6 @@ class AnalyzeRosterView(APIView):
         if not data and OPENROUTER_KEY:
             try:
                 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
-                
                 # Backup A: Gemini 2.0 via OpenRouter
                 try:
                     print("📅 Switching to OpenRouter (Gemini)...")
@@ -346,9 +405,7 @@ class AnalyzeRosterView(APIView):
             except Exception as e:
                 print(f"⚠️ OpenRouter Fallback Failed: {e}")
 
-        if data:
-            return Response(data)
-
+        if data: return Response(data)
         return Response({"error": "Busy. Please try again in 1 minute."}, 503)
 
 @csrf_exempt 
