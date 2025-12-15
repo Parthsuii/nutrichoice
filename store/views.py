@@ -107,7 +107,7 @@ class ScanFoodView(APIView):
                         data = safe_json_extract(res.choices[0].message.content)
                         source_used = "OpenRouter Vision"
                     except Exception as e: 
-                        print(f"❌ OpenRouter Gemini Error: {e}") # <--- PRINTS EXACT ERROR
+                        print(f"❌ OpenRouter Gemini Error: {e}") 
                         
                         # Tertiary Backup: Llama 3.2
                         try:
@@ -119,7 +119,7 @@ class ScanFoodView(APIView):
                             data = safe_json_extract(res.choices[0].message.content)
                             source_used = "OpenRouter Vision (Llama)"
                         except Exception as e2:
-                             print(f"❌ OpenRouter Llama Error: {e2}") # <--- PRINTS EXACT ERROR
+                             print(f"❌ OpenRouter Llama Error: {e2}") 
 
         # PATH B: TEXT ONLY
         elif text_query:
@@ -284,26 +284,72 @@ def swap_meal(request):
     return Response({"name": "Oats Upma", "calories": calories, "protein": 8, "carbs": 40, "fat": 5})
 
 # ==========================================
-# STANDARD VIEWS
+# 6. ROSTER ANALYZER (With Pixtral Fallback)
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):
     parser_classes = (MultiPartParser, FormParser)
     authentication_classes = []
     permission_classes = []
+
     def post(self, request):
         if 'file' not in request.FILES: return Response({"error": "No file"}, 400)
         img = request.FILES['file']
         b64 = encode_image(img)
-        prompt = """Analyze timetable. JSON: { "weekly_schedule": { "Monday": [{"time": "10:00", "event": "Math"}] } }"""
+        
+        # Specialized Prompt for Timetables
+        prompt = """
+        Analyze this timetable/roster image. 
+        Extract the schedule into strict JSON format.
+        JSON Structure: { "weekly_schedule": { "Monday": [{"time": "10:00", "event": "Math"}], "Tuesday": [] } }
+        If text is unclear, guess based on layout.
+        """
+        
+        data = None
+
+        # 1. Try Google Direct (Gemini 2.0)
         if GOOGLE_KEY:
-            genai.configure(api_key=GOOGLE_KEY)
             try:
+                print("📅 Analyzing Roster with Gemini 2.0...")
+                genai.configure(api_key=GOOGLE_KEY)
                 m = genai.GenerativeModel('gemini-2.0-flash-exp')
                 r = m.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt])
-                if r.text: return Response(safe_json_extract(r.text))
-            except: pass
-        return Response({"error": "Busy"}, 503)
+                if r.text: data = safe_json_extract(r.text)
+            except Exception as e:
+                print(f"⚠️ Google Roster Failed: {e}")
+
+        # 2. OpenRouter Fallback chain
+        if not data and OPENROUTER_KEY:
+            try:
+                client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
+                
+                # Backup A: Gemini 2.0 via OpenRouter
+                try:
+                    print("📅 Switching to OpenRouter (Gemini)...")
+                    res = client.chat.completions.create(
+                        model="google/gemini-2.0-flash-exp:free",
+                        messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
+                    )
+                    data = safe_json_extract(res.choices[0].message.content)
+                except: 
+                    print("⚠️ OpenRouter Gemini Failed.")
+
+                # Backup B: Mistral Pixtral 12B (Great for Text/OCR)
+                if not data:
+                    print("📅 Switching to Mistral Pixtral 12B...")
+                    res = client.chat.completions.create(
+                        model="mistralai/pixtral-12b:free", 
+                        messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
+                    )
+                    data = safe_json_extract(res.choices[0].message.content)
+
+            except Exception as e:
+                print(f"⚠️ OpenRouter Fallback Failed: {e}")
+
+        if data:
+            return Response(data)
+
+        return Response({"error": "Busy. Please try again in 1 minute."}, 503)
 
 @csrf_exempt 
 @api_view(['GET'])
