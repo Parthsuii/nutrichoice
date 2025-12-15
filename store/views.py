@@ -7,7 +7,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.contrib.auth.models import User
 from django.conf import settings
-from django.utils import timezone # <--- Added for Meal Plan dates
+from django.utils import timezone 
 import os
 import base64
 import json
@@ -24,7 +24,6 @@ from .serializers import FoodItemSerializer, UserProfileSerializer
 # --- CONFIGURATION ---
 OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")
 GOOGLE_KEY = os.environ.get("GOOGLE_API_KEY") 
-HF_KEY = os.environ.get("HUGGINGFACE_API_KEY")
 
 SITE_URL = "https://nutrichoice.onrender.com"
 APP_NAME = "NutriChoice"
@@ -33,12 +32,7 @@ APP_NAME = "NutriChoice"
 def normalize_food_name(name):
     if not name: return "unknown"
     clean = name.lower().strip()
-    aliases = {
-        "butter paneer": "paneer butter masala",
-        "makhani paneer": "paneer butter masala",
-        "shahi paneer": "paneer butter masala",
-    }
-    return aliases.get(clean, clean)
+    return clean
 
 # --- HELPER: Encode Image ---
 def encode_image(image_file):
@@ -58,7 +52,7 @@ def safe_json_extract(text):
     except: return None
 
 # =========================================================================
-# SMART SCANNER (Robust Model Fallback)
+# SMART SCANNER (Gemini 2.0+ Only)
 # =========================================================================
 @method_decorator(csrf_exempt, name='dispatch')
 class ScanFoodView(APIView):
@@ -74,17 +68,17 @@ class ScanFoodView(APIView):
         source_used = "None"
         food_name_normalized = ""
 
-        # ---------------------------------------------------------
         # PATH A: IMAGE RECEIVED
-        # ---------------------------------------------------------
         if image_file:
-            print("📸 IMAGE SCAN: Processing via Vision AI...")
+            print("📸 IMAGE SCAN: Processing...")
             b64 = encode_image(image_file)
             prompt = """Analyze this food. Return STRICT JSON: { "food_name": "Paneer", "estimated_calories": 300, "protein": 10, "carbs": 20, "fat": 15, "ingredients": ["paneer"], "confidence_score": 90 }"""
             
-            # TRY GOOGLE VISION (Loop through known working models)
+            # 1. Try Google Direct (Gemini 2.0 Only)
             if GOOGLE_KEY:
-                models_to_try = ['gemini-2.0-flash-exp', 'gemini-1.5-flash', 'gemini-1.5-flash-8b']
+                # REMOVED: gemini-1.5-flash
+                # KEPT: Only 2.0 Flash Exp
+                models_to_try = ['gemini-2.0-flash-exp']
                 genai.configure(api_key=GOOGLE_KEY)
                 
                 for model_name in models_to_try:
@@ -97,28 +91,39 @@ class ScanFoodView(APIView):
                             source_used = f"Google Vision ({model_name})"
                             break 
                     except Exception as e:
-                        print(f"Failed {model_name}: {e}")
+                        print(f"⚠️ {model_name} Failed: {e}")
                         continue 
 
-            # OPENROUTER FALLBACK
+            # 2. OpenRouter Fallback (Using Gemini 2.0 or Llama 3.2 as Backup)
             if not data and OPENROUTER_KEY:
                 try:
+                    print("🔄 Google Failed. Trying OpenRouter (Gemini 2.0)...")
                     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
                     res = client.chat.completions.create(
-                        model="google/gemini-2.0-flash-exp:free",
+                        model="google/gemini-2.0-flash-exp:free", # Primary OpenRouter Choice
                         messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
                     )
                     data = safe_json_extract(res.choices[0].message.content)
                     source_used = "OpenRouter Vision"
-                except: pass
+                except: 
+                    # Tertiary Backup: Llama 3.2 Vision (Completely different AI)
+                    try:
+                        print("🔄 Gemini Failed. Trying Llama 3.2...")
+                        client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
+                        res = client.chat.completions.create(
+                            model="meta-llama/llama-3.2-90b-vision-instruct:free",
+                            messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
+                        )
+                        data = safe_json_extract(res.choices[0].message.content)
+                        source_used = "OpenRouter Vision (Llama)"
+                    except: pass
 
-        # ---------------------------------------------------------
-        # PATH B: TEXT ONLY (Robust)
-        # ---------------------------------------------------------
+        # PATH B: TEXT ONLY
         elif text_query:
             food_name_normalized = normalize_food_name(str(text_query))
             print(f"🔍 TEXT SCAN: Checking '{food_name_normalized}'...")
 
+            # 1. Check Cache
             cached = FoodKnowledge.objects.filter(name__iexact=food_name_normalized).first()
             if cached:
                 print(f"⚡ CACHE HIT: {cached.name}")
@@ -134,23 +139,19 @@ class ScanFoodView(APIView):
                     "source": "Local Knowledge Base"
                 })
 
+            # 2. Text AI
             print("🌐 CACHE MISS: Calling Text AI...")
             prompt = f"Analyze '{food_name_normalized}'. Return JSON: {{ \"food_name\": \"{food_name_normalized}\", \"estimated_calories\": 0, \"protein\": 0, \"carbs\": 0, \"fat\": 0, \"ingredients\": [] }}"
             
             if GOOGLE_KEY:
-                text_models = ['gemini-2.0-flash-exp', 'gemini-1.5-flash']
                 genai.configure(api_key=GOOGLE_KEY)
-                
-                for model_name in text_models:
-                    try:
-                        print(f"Trying Text Model: {model_name}...")
-                        model = genai.GenerativeModel(model_name)
-                        res = model.generate_content(prompt)
-                        data = safe_json_extract(res.text)
-                        if data:
-                            source_used = f"Google Text ({model_name})"
-                            break
-                    except: continue
+                try:
+                    # Only using 2.0
+                    model = genai.GenerativeModel('gemini-2.0-flash-exp')
+                    res = model.generate_content(prompt)
+                    data = safe_json_extract(res.text)
+                    if data: source_used = "Google Text (Gemini 2.0)"
+                except: pass
 
             if not data and OPENROUTER_KEY:
                 try:
@@ -161,21 +162,15 @@ class ScanFoodView(APIView):
                     )
                     data = safe_json_extract(res.choices[0].message.content)
                     source_used = "OpenRouter Text"
-                except: 
-                    # SOFT LANDING
-                    data = {
-                        "food_name": food_name_normalized.title(),
-                        "estimated_calories": 0, "protein": 0, "carbs": 0, "fat": 0, "ingredients": [], "confidence_score": 0
-                    }
+                except Exception as e: 
+                    # Soft Landing
+                    data = {"food_name": food_name_normalized.title(), "estimated_calories": 0, "protein": 0, "carbs": 0, "fat": 0, "ingredients": [], "confidence_score": 0}
                     source_used = "Manual Entry (AI Failed)"
 
-        # ---------------------------------------------------------
         # SAVE & RETURN
-        # ---------------------------------------------------------
         if data:
             name = normalize_food_name(data.get('food_name', 'Unknown'))
-            if len(name) < 3 or name.isnumeric():
-                return Response({"error": "Scan unclear, please type name manually"}, status=422)
+            if len(name) < 3 or name.isnumeric(): return Response({"error": "Scan unclear"}, status=422)
 
             try:
                 c_raw = str(data.get('estimated_calories', 0))
@@ -188,20 +183,14 @@ class ScanFoodView(APIView):
                 conf = int(data.get('confidence_score', 80))
             except: cals, prot, carbs, fat, ingredients, conf = 0, 0, 0, 0, [], 0
 
-            if name != "unknown" and cals > 0 and source_used != "Manual Entry (AI Failed)":
+            if name != "unknown" and cals > 0 and "Manual" not in source_used:
                 fk, _ = FoodKnowledge.objects.update_or_create(
                     name=name,
                     defaults={'calories': cals, 'protein': prot, 'carbs': carbs, 'fat': fat, 'ingredients': ingredients, 'confidence_score': conf, 'source': source_used}
                 )
-                FoodItem.objects.create(
-                    user=request.user if request.user.is_authenticated else None,
-                    name=name.title(), calories=cals, protein=prot, carbs=carbs, fat=fat, knowledge_source=fk
-                )
+                FoodItem.objects.create(user=request.user if request.user.is_authenticated else None, name=name.title(), calories=cals, protein=prot, carbs=carbs, fat=fat, knowledge_source=fk)
             elif name != "unknown": 
-                FoodItem.objects.create(
-                    user=request.user if request.user.is_authenticated else None,
-                    name=name.title(), calories=0, protein=0, carbs=0, fat=0
-                )
+                FoodItem.objects.create(user=request.user if request.user.is_authenticated else None, name=name.title(), calories=0, protein=0, carbs=0, fat=0)
 
             return Response({
                 "message": "Success", 
@@ -211,8 +200,102 @@ class ScanFoodView(APIView):
 
         return Response({"error": "Scan Failed"}, 500)
 
+# =========================================================================
+# 5. SMART MEAL PLANNER (Logic Updated: No 1.5)
+# =========================================================================
+@csrf_exempt
+@api_view(['POST'])
+def generate_meal_plan(request):
+    user = User.objects.first() 
+    if not user: return Response({"error": "No user profile"}, 400)
+    profile, _ = UserProfile.objects.get_or_create(user=user)
+    
+    today = timezone.now().date()
+    eaten_today = FoodItem.objects.filter(created_at__date=today)
+    total_eaten = sum(item.calories for item in eaten_today)
+    remaining_cals = profile.daily_calorie_target - total_eaten
+    
+    if remaining_cals <= 0:
+        return Response({
+            "message": "You hit your goal!", 
+            "meals": [{"name": "No more meals needed today", "calories": 0, "protein": 0, "carbs": 0, "fat": 0}]
+        })
+
+    prompt = f"""
+    Act as a nutritionist. 
+    User Stats: Goal {profile.goal}, Remaining Calories: {remaining_cals}.
+    Diet: Indian, Balanced.
+    Task: Create a meal plan for the REST of the day to meet the {remaining_cals} kcal gap.
+    Suggest 2-3 specific meals.
+    Return STRICT JSON: {{ "meals": [ {{ "name": "Moong Dal Khichdi", "calories": 350, "protein": 12, "carbs": 45, "fat": 10, "time": "Dinner" }} ] }}
+    """
+    
+    plan_text = None
+
+    # ATTEMPT 1: Google Gemini 2.0 (Only)
+    if GOOGLE_KEY:
+        try:
+            print("🍱 Planning with Gemini 2.0...")
+            genai.configure(api_key=GOOGLE_KEY)
+            m = genai.GenerativeModel('gemini-2.0-flash-exp')
+            plan_text = m.generate_content(prompt).text
+        except Exception as e:
+            print(f"⚠️ Gemini 2.0 Failed: {e}")
+            # No fallback to 1.5, direct to OpenRouter
+
+    # ATTEMPT 2: OpenRouter (Gemini 2.0)
+    if not plan_text and OPENROUTER_KEY:
+        try:
+            print("🍱 Switching to OpenRouter (Gemini 2.0)...")
+            client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
+            res = client.chat.completions.create(
+                model="google/gemini-2.0-flash-exp:free", 
+                messages=[{"role": "user", "content": prompt}]
+            )
+            plan_text = res.choices[0].message.content
+        except:
+             # ATTEMPT 3: OpenRouter (Llama 3.2 - Different AI Backup)
+             try:
+                print("🍱 Switching to Llama 3.2...")
+                client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
+                res = client.chat.completions.create(
+                    model="meta-llama/llama-3.2-90b-vision-instruct:free", 
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                plan_text = res.choices[0].message.content
+             except: pass
+
+    if plan_text:
+        data = safe_json_extract(plan_text)
+        if data and "meals" in data:
+            return Response(data)
+
+    # Hard Fallback
+    return Response({
+        "meals": [
+            { "name": "Oats with Milk (Fallback Plan)", "calories": 300, "protein": 10, "carbs": 40, "fat": 8, "time": "Anytime" },
+            { "name": "Green Salad", "calories": 100, "protein": 2, "carbs": 10, "fat": 0, "time": "Side" }
+        ]
+    })
+
+@csrf_exempt
+@api_view(['POST'])
+def swap_meal(request):
+    old_meal = request.data.get('old_meal', 'Meal')
+    calories = request.data.get('calories', 500)
+    prompt = f"Suggest ONE vegetarian Indian replacement for '{old_meal}' (~{calories} kcal). Return JSON: {{ \"name\": \"...\", \"calories\": {calories}, \"protein\": 0, \"carbs\": 0, \"fat\": 0 }}"
+    try:
+        if GOOGLE_KEY:
+            genai.configure(api_key=GOOGLE_KEY)
+            m = genai.GenerativeModel('gemini-2.0-flash-exp') # Updated to 2.0
+            res = m.generate_content(prompt)
+            data = safe_json_extract(res.text)
+            if data: return Response(data)
+    except: pass
+    return Response({"name": "Oats Upma", "calories": calories, "protein": 8, "carbs": 40, "fat": 5})
+
 # ==========================================
-# OTHER VIEWS
+# STANDARD VIEWS
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):
@@ -224,15 +307,13 @@ class AnalyzeRosterView(APIView):
         img = request.FILES['file']
         b64 = encode_image(img)
         prompt = """Analyze timetable. JSON: { "weekly_schedule": { "Monday": [{"time": "10:00", "event": "Math"}] } }"""
-        
         if GOOGLE_KEY:
             genai.configure(api_key=GOOGLE_KEY)
-            for m_name in ['gemini-2.0-flash-exp', 'gemini-1.5-flash']:
-                try:
-                    m = genai.GenerativeModel(m_name)
-                    r = m.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt])
-                    if r.text: return Response(safe_json_extract(r.text))
-                except: continue
+            try:
+                m = genai.GenerativeModel('gemini-2.0-flash-exp') # Updated to 2.0
+                r = m.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt])
+                if r.text: return Response(safe_json_extract(r.text))
+            except: pass
         return Response({"error": "Busy"}, 503)
 
 @csrf_exempt 
@@ -262,7 +343,7 @@ def ask_nutritionist(request):
     try:
         if GOOGLE_KEY:
             genai.configure(api_key=GOOGLE_KEY)
-            m = genai.GenerativeModel('gemini-2.0-flash-exp') 
+            m = genai.GenerativeModel('gemini-2.0-flash-exp') # 2.0 Only
             return Response({"answer": m.generate_content(q).text})
     except: return Response({"error": "AI Error"}, 500)
 
@@ -282,95 +363,3 @@ def user_profile_view(request):
             serializer.save()
             return Response({"message": "Updated"})
         return Response(serializer.errors, 400)
-
-# =========================================================================
-# SMART MEAL PLANNER (Logic Added)
-# =========================================================================
-@csrf_exempt
-@api_view(['POST'])
-def generate_meal_plan(request):
-    # 1. Get User Data
-    user = User.objects.first() 
-    if not user: return Response({"error": "No user profile"}, 400)
-    profile, _ = UserProfile.objects.get_or_create(user=user)
-    
-    # 2. Calculate "Calories Remaining"
-    today = timezone.now().date()
-    eaten_today = FoodItem.objects.filter(created_at__date=today)
-    total_eaten = sum(item.calories for item in eaten_today)
-    remaining_cals = profile.daily_calorie_target - total_eaten
-    
-    # 3. Handle "Goal Hit" Case
-    if remaining_cals <= 0:
-        return Response({
-            "message": "You hit your goal!", 
-            "meals": [{"name": "No more meals needed today", "calories": 0, "protein": 0, "carbs": 0, "fat": 0}]
-        })
-
-    print(f"🍱 Generating Plan: Goal {profile.daily_calorie_target} - Eaten {total_eaten} = Remaining {remaining_cals}")
-
-    # 4. Generate AI Prompt
-    prompt = f"""
-    Act as a nutritionist. 
-    User Stats: Goal {profile.goal}, Remaining Calories: {remaining_cals}.
-    Diet: Indian, Balanced.
-    
-    Task: Create a meal plan for the REST of the day to meet the {remaining_cals} kcal gap.
-    Suggest 2-3 specific meals (e.g., Snack, Dinner).
-    
-    Return STRICT JSON:
-    {{
-      "meals": [
-        {{ "name": "Moong Dal Khichdi + Curd", "calories": 350, "protein": 12, "carbs": 45, "fat": 10, "time": "Dinner" }},
-        {{ "name": "Roasted Chana", "calories": 100, "protein": 5, "carbs": 15, "fat": 2, "time": "Snack" }}
-      ]
-    }}
-    """
-    
-    try:
-        plan_text = ""
-        # Try Google Gemini 2.0 First
-        if GOOGLE_KEY:
-            genai.configure(api_key=GOOGLE_KEY)
-            m = genai.GenerativeModel('gemini-2.0-flash-exp')
-            plan_text = m.generate_content(prompt).text
-        # Fallback to OpenRouter
-        elif OPENROUTER_KEY:
-            client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
-            res = client.chat.completions.create(
-                model="google/gemini-2.0-flash-exp:free",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            plan_text = res.choices[0].message.content
-            
-        data = safe_json_extract(plan_text)
-        if data and "meals" in data:
-            return Response(data)
-            
-    except Exception as e:
-        print(f"Meal Plan Error: {e}")
-
-    return Response({"meals": []}) 
-
-@csrf_exempt
-@api_view(['POST'])
-def swap_meal(request):
-    """
-    Regenerates a single meal suggestion.
-    """
-    old_meal = request.data.get('old_meal', 'Meal')
-    calories = request.data.get('calories', 500)
-    
-    prompt = f"Suggest ONE vegetarian Indian replacement for '{old_meal}' (~{calories} kcal). Return JSON: {{ \"name\": \"...\", \"calories\": {calories}, \"protein\": 0, \"carbs\": 0, \"fat\": 0 }}"
-    
-    try:
-        if GOOGLE_KEY:
-            genai.configure(api_key=GOOGLE_KEY)
-            m = genai.GenerativeModel('gemini-1.5-flash')
-            res = m.generate_content(prompt)
-            data = safe_json_extract(res.text)
-            if data: return Response(data)
-    except: pass
-    
-    # Fallback Hardcoded
-    return Response({"name": "Oats Upma", "calories": calories, "protein": 8, "carbs": 40, "fat": 5})
