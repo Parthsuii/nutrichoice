@@ -211,7 +211,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
               children: [
                 // Dropdown
                 DropdownButtonFormField<String>(
-                  value: _contextOptions.contains(_selectedContext) ? _selectedContext : _contextOptions[0],
+                  initialValue: _contextOptions.contains(_selectedContext) ? _selectedContext : _contextOptions[0],
                   dropdownColor: Colors.grey.shade800,
                   style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
                   decoration: const InputDecoration(

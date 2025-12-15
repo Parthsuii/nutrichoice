@@ -126,7 +126,7 @@ class _MealLogScreenState extends State<MealLogScreen> {
              
              if(mounted) {
                ScaffoldMessenger.of(context).showSnackBar(
-                 SnackBar(content: Text("Reading Label: '${extractedText!.substring(0, min(20, extractedText.length))}...'"), backgroundColor: Colors.teal),
+                 SnackBar(content: Text("Reading Label: '${extractedText.substring(0, min(20, extractedText.length))}...'"), backgroundColor: Colors.teal),
                );
              }
           }

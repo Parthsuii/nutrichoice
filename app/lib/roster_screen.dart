@@ -464,7 +464,7 @@ class _RosterScreenState extends State<RosterScreen> {
               Expanded(
                 flex: 2,
                 child: DropdownButtonFormField<String>(
-                  value: _dayController.text.isNotEmpty ? _dayController.text : "Monday", 
+                  initialValue: _dayController.text.isNotEmpty ? _dayController.text : "Monday", 
                   dropdownColor: Colors.grey.shade800,
                   items: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
                       .map((d) => DropdownMenuItem(value: d, child: Text(d, style: const TextStyle(color: Colors.white)))).toList(),

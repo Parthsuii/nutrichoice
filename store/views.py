@@ -39,10 +39,12 @@ def encode_image(image_file):
 
 def safe_json_extract(text):
     if not text: return None
+    # Remove markdown code blocks (```json ... ```)
     text = re.sub(r"```[a-z]*", "", text).replace("```", "").strip()
     try: return json.loads(text)
     except: pass
     try:
+        # Aggressive Regex Fix for broken JSON keys
         fixed_text = re.sub(r'(?<!")(\b\w+\b)(?=\s*:)', r'"\1"', text)
         fixed_text = re.sub(r'(:\s*)([a-zA-Z_]\w*)(?=\s*[,}])', r'\1"\2"', fixed_text)
         return json.loads(fixed_text)
@@ -74,7 +76,11 @@ class ScanFoodView(APIView):
                 genai.configure(api_key=GOOGLE_KEY)
                 try:
                     model = genai.GenerativeModel('gemini-2.0-flash-exp')
-                    res = model.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt])
+                    # Force JSON mode for Vision too
+                    res = model.generate_content(
+                        [{'mime_type': 'image/jpeg', 'data': b64}, prompt],
+                        generation_config={"response_mime_type": "application/json"}
+                    )
                     if res.text:
                         data = safe_json_extract(res.text)
                         source_used = "Google Vision (Gemini 2.0)"
@@ -95,7 +101,7 @@ class ScanFoodView(APIView):
             food_name_normalized = normalize_food_name(str(text_query))
             print(f"🔍 TEXT SCAN: Checking '{food_name_normalized}'...")
             
-            # 1. Check Cache
+            # Check Cache
             cached = FoodKnowledge.objects.filter(name__iexact=food_name_normalized).first()
             if cached:
                 print(f"⚡ CACHE HIT: {cached.name}")
@@ -111,14 +117,13 @@ class ScanFoodView(APIView):
                     "source": "Local Knowledge Base"
                 })
 
-            # 2. AI Fetch
             prompt = f"Analyze '{food_name_normalized}'. JSON: {{ \"food_name\": \"{food_name_normalized}\", \"estimated_calories\": 0, \"protein\": 0, \"carbs\": 0, \"fat\": 0, \"ingredients\": [] }}"
             
             if GOOGLE_KEY:
                 try:
                     genai.configure(api_key=GOOGLE_KEY)
                     model = genai.GenerativeModel('gemini-2.0-flash-exp')
-                    res = model.generate_content(prompt)
+                    res = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
                     data = safe_json_extract(res.text)
                     if data: source_used = "Google Text"
                 except: pass
@@ -147,9 +152,7 @@ class ScanFoodView(APIView):
             except: cals, prot, carbs, fat, ingredients = 0, 0, 0, 0, []
 
             if name != "unknown":
-                # --- FIX: SAFE CACHE UPDATE ---
-                # Only update global knowledge if we found valid calories (>0)
-                # This prevents AI hallucinations (0 cal) from poisoning the DB
+                # --- SAFE CACHE UPDATE ---
                 fk = None
                 if cals > 0:
                     fk, _ = FoodKnowledge.objects.update_or_create(
@@ -157,10 +160,8 @@ class ScanFoodView(APIView):
                         defaults={'calories': cals, 'protein': prot, 'carbs': carbs, 'fat': fat, 'ingredients': ingredients, 'source': source_used}
                     )
                 else:
-                    # If AI failed to get cals, try to find existing knowledge without overwriting
                     fk = FoodKnowledge.objects.filter(name=name).first()
 
-                # Create user log regardless
                 FoodItem.objects.create(
                     user=request.user if request.user.is_authenticated else None, 
                     name=name.title(), 
@@ -177,7 +178,7 @@ class ScanFoodView(APIView):
         return Response({"error": "AI Busy. Manual entry required."}, 422)
 
 # =========================================================================
-# 2. SMART MEAL PLANNER (Mistral Fallback + App Priority)
+# 2. SMART MEAL PLANNER (Forced JSON Mode + Mistral)
 # =========================================================================
 @csrf_exempt
 @api_view(['POST'])
@@ -186,105 +187,116 @@ def generate_meal_plan(request):
     if not user: return Response({"error": "No user profile"}, 400)
     profile, _ = UserProfile.objects.get_or_create(user=user)
     
-    # 1. PRIORITY: App Data > DB Data
-    print("🍱 MEAL PLAN REQUEST:")
-    print(f"   - App Calories: {request.data.get('daily_calories')}")
-    print(f"   - Context: {request.data.get('activity_context')}")
-    
+    # 1. EXTRACT DATA (Trust App Data First)
     app_target = request.data.get('daily_calories')
-    daily_target = int(app_target) if app_target else (profile.daily_calorie_target or 2200)
-    context = request.data.get('activity_context', 'Standard')
-    ingredients = request.data.get('available_ingredients', [])
+    # Handle int vs string input safely
+    if app_target is not None:
+        try: daily_target = int(app_target)
+        except: daily_target = profile.daily_calorie_target or 2200
+    else:
+        daily_target = profile.daily_calorie_target or 2200
 
+    if daily_target == 0: daily_target = 2200 # Fallback default
+
+    context = request.data.get('activity_context', 'Standard Day')
+    ingredients = request.data.get('available_ingredients', [])
+    
+    # 2. CALCULATE GAP
     today = timezone.now().date()
     current_hour = timezone.localtime().hour 
     eaten_today = FoodItem.objects.filter(created_at__date=today)
     total_eaten = sum(item.calories for item in eaten_today)
     remaining_cals = daily_target - total_eaten
     
-    print(f"   - Gap: {remaining_cals} kcal")
+    print(f"🤖 PLANNER LOG: Target {daily_target} | Eaten {total_eaten} | Gap {remaining_cals}")
 
+    # 3. GENERATE PROMPT (Optimized for JSON Mode)
+    pantry_text = ", ".join(ingredients) if ingredients else "Simple ingredients"
+    
     prompt = f"""
-    Act as a Michelin Star Nutritionist.
+    You are a strictly compliant JSON API. Do not output markdown. Do not output chat.
     
-    CLIENT DATA:
-    - Target: {daily_target} kcal
-    - Eaten: {total_eaten} kcal
-    - REMAINING TO FILL: {remaining_cals} kcal (Important!)
-    - Current Time: {current_hour}:00
-    - Mode: {context} (Adjust macros based on this).
-    - Pantry: {', '.join(ingredients) if ingredients else 'Any common ingredients'}
-    
-    INSTRUCTIONS:
-    1. If remaining calories are low (< 200), suggest a light snack.
-    2. If remaining calories are high (> 600), suggest a full meal.
-    3. Use the Pantry ingredients if possible.
-    
-    OUTPUT JSON ONLY:
+    TASK: Generate a meal plan based on:
+    - REMAINING CALORIES: {remaining_cals} (Target: {daily_target})
+    - CURRENT TIME: {current_hour}:00
+    - CONTEXT: {context}
+    - PANTRY: {pantry_text}
+
+    RULES:
+    1. If remaining calories < 200, suggest a light snack.
+    2. If remaining calories > 500, suggest a solid meal.
+    3. Return valid JSON only.
+
+    OUTPUT FORMAT:
     {{
-      "analysis": "1 sentence on why this fits.",
+      "analysis": "1 short sentence analysis.",
       "meals": [
         {{ 
-           "name": "Creative Dish Name", 
-           "calories": 450, "protein": 25, "carbs": 40, "fat": 15, 
-           "time": "Dinner",
-           "ingredients": ["Item 1", "Item 2"],
+           "name": "Dish Name", 
+           "calories": {remaining_cals}, 
+           "protein": 20, "carbs": 30, "fat": 10, 
+           "time": "Meal",
+           "ingredients": ["Item1", "Item2"],
            "recipe": ["Step 1", "Step 2"]
         }}
       ]
     }}
     """
-    
-    plan_text = None
 
-    # ATTEMPT 1: Google Gemini 2.0 (Fastest)
+    plan_text = None
+    ai_source = "None"
+
+    # --- PATH 1: GOOGLE GEMINI 2.0 (Forced JSON Mode) ---
     if GOOGLE_KEY:
         try:
-            print("   -> Trying Google Gemini 2.0...")
+            print("   👉 Asking Google Gemini 2.0...")
             genai.configure(api_key=GOOGLE_KEY)
             m = genai.GenerativeModel('gemini-2.0-flash-exp')
-            plan_text = m.generate_content(prompt).text
-        except Exception as e: print(f"   x Google Failed: {e}")
+            # KEY FIX: Force JSON MIME type
+            plan_text = m.generate_content(
+                prompt, 
+                generation_config={"response_mime_type": "application/json"}
+            ).text
+            ai_source = "Google Gemini"
+        except Exception as e: 
+            print(f"   ❌ Google Error: {e}")
 
-    # ATTEMPT 2: OpenRouter (Gemini)
+    # --- PATH 2: MISTRAL VIA OPENROUTER (Strict JSON System Prompt) ---
     if not plan_text and OPENROUTER_KEY:
         try:
-            print("   -> Trying OpenRouter Gemini...")
-            client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
-            res = client.chat.completions.create(
-                model="google/gemini-2.0-flash-exp:free", 
-                messages=[{"role": "user", "content": prompt}]
-            )
-            plan_text = res.choices[0].message.content
-        except: pass
-
-    # ATTEMPT 3: OpenRouter (MISTRAL 7B - Reliable JSON)
-    if not plan_text and OPENROUTER_KEY:
-        try:
-            print("   -> Trying MISTRAL (Fallback)...")
+            print("   👉 Switching to Mistral (OpenRouter)...")
             client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
             res = client.chat.completions.create(
                 model="mistralai/mistral-7b-instruct:free", 
-                messages=[{"role": "user", "content": prompt}]
+                messages=[
+                    {"role": "system", "content": "You are a JSON generator. Output valid JSON only."}, 
+                    {"role": "user", "content": prompt}
+                ]
             )
             plan_text = res.choices[0].message.content
-        except: pass
+            ai_source = "Mistral 7B"
+        except Exception as e:
+            print(f"   ❌ Mistral Error: {e}")
 
+    # 4. PARSE & RETURN
     if plan_text:
+        print(f"   ✅ AI Response ({ai_source}): {plan_text[:100]}...") # Log start of response
         data = safe_json_extract(plan_text)
         if data and "meals" in data:
             return Response(data)
+        else:
+            print(f"   ⚠️ Parsing Failed. Raw output: {plan_text}")
 
-    print("   ⚠️ Sending Hard Fallback Meal")
+    # 5. LAST RESORT DEFAULT
+    print("   ❌ All AI paths failed. Using Fallback.")
     return Response({
-        "analysis": "AI was unreachable. Here is a balanced default option.",
+        "analysis": "AI Service Busy. Here is a default suggestion.",
         "meals": [
             { 
-                "name": "Quick Protein Oats", 
-                "calories": 300, "protein": 15, "carbs": 35, "fat": 6, 
-                "time": "Anytime",
-                "ingredients": ["Oats", "Milk", "Peanut Butter"],
-                "recipe": ["Boil oats in milk.", "Stir in peanut butter.", "Serve warm."]
+                "name": "Protein Oats", 
+                "calories": 300, "protein": 15, "carbs": 35, "fat": 6, "time": "Anytime",
+                "ingredients": ["Oats", "Milk"],
+                "recipe": ["Boil oats", "Serve warm"]
             }
         ]
     })
@@ -302,7 +314,7 @@ def swap_meal(request):
         if GOOGLE_KEY:
             genai.configure(api_key=GOOGLE_KEY)
             m = genai.GenerativeModel('gemini-2.0-flash-exp') 
-            res = m.generate_content(prompt)
+            res = m.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
             data = safe_json_extract(res.text)
             if data: return Response(data)
     except: pass
@@ -330,7 +342,6 @@ class AnalyzeRosterView(APIView):
         Analyze this timetable/roster image. 
         Extract the schedule into strict JSON format.
         JSON Structure: { "weekly_schedule": { "Monday": [{"time": "10:00", "event": "Math"}], "Tuesday": [] } }
-        If text is unclear, guess based on layout.
         """
         data = None
 
@@ -339,28 +350,20 @@ class AnalyzeRosterView(APIView):
                 print("📅 Analyzing Roster with Gemini 2.0...")
                 genai.configure(api_key=GOOGLE_KEY)
                 m = genai.GenerativeModel('gemini-2.0-flash-exp')
-                r = m.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt])
-                if r.text: data = safe_json_extract(r.text)
+                res = m.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt], generation_config={"response_mime_type": "application/json"})
+                if res.text: data = safe_json_extract(res.text)
             except Exception as e: print(f"⚠️ Google Roster Failed: {e}")
 
         if not data and OPENROUTER_KEY:
             try:
                 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
-                try:
-                    print("📅 Switching to OpenRouter (Gemini)...")
-                    res = client.chat.completions.create(
-                        model="google/gemini-2.0-flash-exp:free",
-                        messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
-                    )
-                    data = safe_json_extract(res.choices[0].message.content)
-                except: 
-                    # --- FIX: SWAP PIXTRAL FOR QWEN-2-VL ---
-                    print("⚠️ OpenRouter Gemini Failed. Trying Qwen-2-VL (More Stable)...")
-                    res = client.chat.completions.create(
-                        model="qwen/qwen-2-vl-7b-instruct:free", 
-                        messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
-                    )
-                    data = safe_json_extract(res.choices[0].message.content)
+                # Try Qwen-2-VL (Best Free Vision Model currently)
+                print("⚠️ OpenRouter: Trying Qwen-2-VL...")
+                res = client.chat.completions.create(
+                    model="qwen/qwen-2-vl-7b-instruct:free", 
+                    messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
+                )
+                data = safe_json_extract(res.choices[0].message.content)
             except Exception as e: print(f"⚠️ OpenRouter Failed: {e}")
 
         if data: return Response(data)
