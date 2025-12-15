@@ -77,13 +77,25 @@ class ApiService {
     }
   }
 
-  // --- 4. SCAN FOOD ---
-  static Future<Map<String, dynamic>> scanFood(File imageFile) async {
+  // --- 4. SMART SCAN (Text or Image) ---
+  // UPDATED: Now supports sending Text (OCR) OR Image
+  static Future<Map<String, dynamic>> scanFoodSmart(File? imageFile, String? extractedText) async {
     final url = Uri.parse('$baseUrl/scan-food/');
     try {
-      print("Uploading image to $url...");
       var request = http.MultipartRequest('POST', url);
-      request.files.add(await http.MultipartFile.fromPath('image', imageFile.path));
+
+      // STRATEGY: Prioritize Text (Faster/Cheaper)
+      if (extractedText != null && extractedText.isNotEmpty) {
+        print("🚀 Sending EXTRACTED TEXT to Backend: $extractedText");
+        request.fields['food_name'] = extractedText;
+      } 
+      // Fallback: Send Image (Vision AI)
+      else if (imageFile != null) {
+        print("📸 Sending IMAGE to Backend...");
+        request.files.add(await http.MultipartFile.fromPath('image', imageFile.path));
+      } else {
+        throw Exception("No image or text provided.");
+      }
 
       var streamedResponse = await request.send();
       var response = await http.Response.fromStream(streamedResponse);
@@ -116,15 +128,14 @@ class ApiService {
     }
   }
 
-  // --- 6. GENERATE MEAL PLAN (NEW) ---
-  // Connects to: /api/generate-meal-plan
+  // --- 6. GENERATE MEAL PLAN ---
   static Future<Map<String, dynamic>> generateMealPlan({
     required String goal,
     required int calories,
     required String context,
     required List<String> ingredients,
   }) async {
-    final url = Uri.parse('$baseUrl/generate-meal-plan');
+    final url = Uri.parse('$baseUrl/generate-meal-plan/'); // Note: Added trailing slash just in case
     try {
       print("Generating plan for context: $context...");
       final response = await http.post(
@@ -149,14 +160,13 @@ class ApiService {
     }
   }
 
-  // --- 7. SWAP MEAL (NEW) ---
-  // Connects to: /api/swap-meal
+  // --- 7. SWAP MEAL ---
   static Future<Map<String, dynamic>> swapMeal({
     required String goal,
     required int calories,
     required String context,
   }) async {
-    final url = Uri.parse('$baseUrl/swap-meal');
+    final url = Uri.parse('$baseUrl/swap-meal/');
     try {
       print("Swapping meal...");
       final response = await http.post(

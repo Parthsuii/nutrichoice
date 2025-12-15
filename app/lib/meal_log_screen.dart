@@ -1,10 +1,9 @@
 import 'dart:io';
-import 'dart:convert'; // For jsonDecode
+import 'dart:math'; // For min function
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:http/http.dart' as http; // For manual API call
-import 'package:crypto/crypto.dart'; // For Hashing
-import 'package:hive/hive.dart'; // For Cache
+// 1. ADD ML KIT IMPORT
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import '../services/api_service.dart'; 
 
 class MealLogScreen extends StatefulWidget {
@@ -48,7 +47,8 @@ class _MealLogScreenState extends State<MealLogScreen> {
           },
         }).toList().cast<Map<String, dynamic>>();
         
-        _mealHistory = _mealHistory.reversed.toList();
+        // Show newest first
+        _mealHistory = _mealHistory.toList(); 
         _calculateTotals();
         _isLoading = false;
       });
@@ -58,16 +58,13 @@ class _MealLogScreenState extends State<MealLogScreen> {
     }
   }
 
- 
   // --- 2. DELETE FUNCTION ---
   Future<void> _deleteMeal(int id, int index) async {
-    // 1. Remove from screen immediately (Optimistic UI)
     setState(() {
       _mealHistory.removeAt(index);
       _calculateTotals();
     });
 
-    // 2. Tell Server to delete
     try {
       await ApiService.deleteFood(id);
       if(mounted) {
@@ -99,7 +96,7 @@ class _MealLogScreenState extends State<MealLogScreen> {
     });
   }
 
-  // --- 3. SMART CAMERA SCANNER (With Caching) ---
+  // --- 3. HYBRID SCANNER (OCR + VISION) ---
   Future<void> _pickImage(ImageSource source) async {
     final picker = ImagePicker();
     final pickedFile = await picker.pickImage(source: source);
@@ -108,80 +105,58 @@ class _MealLogScreenState extends State<MealLogScreen> {
       setState(() => _isLoading = true);
       
       try {
-        File imageFile = File(pickedFile.path);
-        final bytes = await imageFile.readAsBytes();
+        final File imageFile = File(pickedFile.path);
+        String? extractedText;
 
-        // A. CALCULATE HASH (Fingerprint)
-        final hash = sha1.convert(bytes).toString();
-        final cacheBox = Hive.box('food_cache'); // Assumes box opened in main.dart
-
-        Map<String, dynamic>? foodData;
-
-        // B. CHECK CACHE
-        if (cacheBox.containsKey(hash)) {
-          print("⚡ CACHE HIT: Loading from local storage");
-          final cachedMap = Map<String, dynamic>.from(cacheBox.get(hash));
-          foodData = cachedMap;
+        // PHASE A: ON-DEVICE OCR (Instant & Free)
+        try {
+          print("⚡ Running On-Device OCR...");
+          final inputImage = InputImage.fromFile(imageFile);
+          final textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
+          final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
           
-          if(mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-               const SnackBar(content: Text("Loaded from Cache (Zero Cost!)"), backgroundColor: Colors.green),
-            );
-          }
-        } else {
-          // C. CACHE MISS -> CALL SERVER
-          print("🌐 CACHE MISS: Calling API...");
-          if(mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text("AI Analyzing Food... Please wait.")),
-            );
-          }
+          String rawText = recognizedText.text.trim();
+          textRecognizer.close(); // Clean up
 
-          // Manual Multipart Request (Inlined to control caching)
-          var uri = Uri.parse("https://nutrichoice-xvpf.onrender.com/api/scan-food/");
-          var request = http.MultipartRequest('POST', uri);
-          request.files.add(http.MultipartFile.fromBytes('image', bytes, filename: 'scan.jpg'));
-
-          var response = await request.send();
-          
-          if (response.statusCode == 200) {
-             var responseBody = await response.stream.bytesToString();
-             var jsonResponse = json.decode(responseBody);
+          // HEURISTIC: Only use text if it looks like a real label (>4 chars)
+          if (rawText.length > 4) {
+             // Clean newlines to make it a single search query
+             extractedText = rawText.replaceAll("\n", " "); 
+             print("⚡ ML KIT FOUND: $extractedText");
              
-             if (jsonResponse['saved_data'] != null) {
-               foodData = jsonResponse['saved_data'];
-               // D. SAVE TO CACHE
-               await cacheBox.put(hash, foodData);
-               print("💾 Saved to Cache: $hash");
+             if(mounted) {
+               ScaffoldMessenger.of(context).showSnackBar(
+                 SnackBar(content: Text("Reading Label: '${extractedText!.substring(0, min(20, extractedText.length))}...'"), backgroundColor: Colors.teal),
+               );
              }
-          } else {
-            throw Exception("Server Error: ${response.statusCode}");
           }
+        } catch (e) {
+          print("⚠️ OCR Failed (Falling back to Vision AI): $e");
         }
 
-        // E. UPDATE UI WITH RESULT
-        if (foodData != null) {
-          // Normalize data for UI
-          final newMeal = {
-            "id": foodData['id'] ?? 0, // ID might be missing if cached only, but that's okay for UI
-            "description": foodData['food_name'] ?? "Unknown",
-            "calories": foodData['estimated_calories'] ?? 0,
-            "macros": {
-              "protein": foodData['protein'] ?? 0,
-              "carbs": foodData['carbs'] ?? 0,
-              "fat": foodData['fat'] ?? 0,
-            },
-          };
+        // PHASE B: CALL BACKEND (Smart Scan)
+        // We pass 'extractedText'. 
+        // If it exists, backend uses Text Search (0 Cost).
+        // If null, backend uses Image Vision (1 Call).
+        final response = await ApiService.scanFoodSmart(imageFile, extractedText);
 
-          setState(() {
-            _mealHistory.insert(0, newMeal); // Add to top of list
-            _calculateTotals();
-          });
-          
-          // Optional: Refresh full history to ensure ID sync if it was a fresh server scan
-          if (!cacheBox.containsKey(hash)) {
-             await _fetchFoodHistory(); 
-          }
+        if (response['saved_data'] != null) {
+           final foodData = response['saved_data'];
+           
+           // Insert new meal at top
+           setState(() {
+             _mealHistory.insert(0, {
+                "id": foodData['id'] ?? 0, 
+                "description": foodData['food_name'],
+                "calories": foodData['estimated_calories'],
+                "macros": {
+                  "protein": foodData['protein'],
+                  "carbs": foodData['carbs'],
+                  "fat": foodData['fat'],
+                }
+             });
+             _calculateTotals();
+           });
         }
 
       } catch (e) {
@@ -280,7 +255,6 @@ class _MealLogScreenState extends State<MealLogScreen> {
                                 children: [
                                   Row(
                                     children: [
-                                      // FOOD NAME
                                       Expanded(
                                         child: Text(
                                           log['description'] ?? "Meal",
@@ -288,13 +262,8 @@ class _MealLogScreenState extends State<MealLogScreen> {
                                           overflow: TextOverflow.ellipsis,
                                         ),
                                       ),
-                                      
-                                      // CALORIES
                                       Text("${log['calories']} kcal", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                                      
                                       const SizedBox(width: 10),
-                                      
-                                      // DELETE BUTTON
                                       IconButton(
                                         icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
                                         onPressed: () => _deleteMeal(id, index),
