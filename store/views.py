@@ -7,7 +7,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.contrib.auth.models import User
 from django.conf import settings
-from django.utils import timezone # Core Django Timezone utils
+from django.utils import timezone
 import os
 import base64
 import json
@@ -28,18 +28,15 @@ GOOGLE_KEY = os.environ.get("GOOGLE_API_KEY")
 SITE_URL = "https://nutrichoice.onrender.com"
 APP_NAME = "NutriChoice"
 
-# --- HELPER: Normalization ---
 def normalize_food_name(name):
     if not name: return "unknown"
     clean = name.lower().strip()
     return clean
 
-# --- HELPER: Encode Image ---
 def encode_image(image_file):
     image_file.seek(0)
     return base64.b64encode(image_file.read()).decode('utf-8')
 
-# --- HELPER: Robust JSON Extraction ---
 def safe_json_extract(text):
     if not text: return None
     text = re.sub(r"```[a-z]*", "", text).replace("```", "").strip()
@@ -52,7 +49,7 @@ def safe_json_extract(text):
     except: return None
 
 # =========================================================================
-# 1. SMART SCANNER (Failover: Google 2.0 -> OpenRouter -> Llama)
+# 1. SMART SCANNER (Google -> OpenRouter -> Qwen/Llama)
 # =========================================================================
 @method_decorator(csrf_exempt, name='dispatch')
 class ScanFoodView(APIView):
@@ -68,64 +65,36 @@ class ScanFoodView(APIView):
         source_used = "None"
         food_name_normalized = ""
 
-        # PATH A: IMAGE RECEIVED
         if image_file:
             print("📸 IMAGE SCAN: Processing...")
             b64 = encode_image(image_file)
             prompt = """Analyze this food. Return STRICT JSON: { "food_name": "Paneer", "estimated_calories": 300, "protein": 10, "carbs": 20, "fat": 15, "ingredients": ["paneer"], "confidence_score": 90 }"""
             
-            # 1. Try Google Direct
             if GOOGLE_KEY:
-                models_to_try = ['gemini-2.0-flash-exp']
                 genai.configure(api_key=GOOGLE_KEY)
-                
-                for model_name in models_to_try:
-                    try:
-                        print(f"🔹 Google: Trying {model_name}...")
-                        model = genai.GenerativeModel(model_name)
-                        res = model.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt])
-                        if res.text:
-                            data = safe_json_extract(res.text)
-                            source_used = f"Google Vision ({model_name})"
-                            break 
-                    except Exception as e:
-                        print(f"⚠️ Google Failed: {str(e)[:100]}") # Print first 100 chars of error
-                        continue 
+                try:
+                    model = genai.GenerativeModel('gemini-2.0-flash-exp')
+                    res = model.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt])
+                    if res.text:
+                        data = safe_json_extract(res.text)
+                        source_used = "Google Vision (Gemini 2.0)"
+                except Exception as e: print(f"Google Failed: {e}")
 
-            # 2. OpenRouter Fallback
-            if not data:
-                if not OPENROUTER_KEY:
-                    print("❌ OpenRouter Skipped: No API Key found in Environment!")
-                else:
-                    try:
-                        print("🔄 Trying OpenRouter (Gemini 2.0)...")
-                        client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
-                        res = client.chat.completions.create(
-                            model="google/gemini-2.0-flash-exp:free",
-                            messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
-                        )
-                        data = safe_json_extract(res.choices[0].message.content)
-                        source_used = "OpenRouter Vision"
-                    except Exception as e: 
-                        print(f"❌ OpenRouter Gemini Error: {e}") 
-                        
-                        # Tertiary Backup: Llama 3.2
-                        try:
-                            print("🔄 Trying OpenRouter (Llama 3.2)...")
-                            res = client.chat.completions.create(
-                                model="meta-llama/llama-3.2-90b-vision-instruct:free",
-                                messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
-                            )
-                            data = safe_json_extract(res.choices[0].message.content)
-                            source_used = "OpenRouter Vision (Llama)"
-                        except Exception as e2:
-                             print(f"❌ OpenRouter Llama Error: {e2}") 
+            if not data and OPENROUTER_KEY:
+                try:
+                    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
+                    res = client.chat.completions.create(
+                        model="google/gemini-2.0-flash-exp:free",
+                        messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
+                    )
+                    data = safe_json_extract(res.choices[0].message.content)
+                    source_used = "OpenRouter Vision"
+                except: pass
 
-        # PATH B: TEXT ONLY
         elif text_query:
             food_name_normalized = normalize_food_name(str(text_query))
             print(f"🔍 TEXT SCAN: Checking '{food_name_normalized}'...")
-
+            
             # 1. Check Cache
             cached = FoodKnowledge.objects.filter(name__iexact=food_name_normalized).first()
             if cached:
@@ -142,17 +111,16 @@ class ScanFoodView(APIView):
                     "source": "Local Knowledge Base"
                 })
 
-            # 2. Text AI
-            print("🌐 CACHE MISS: Calling Text AI...")
-            prompt = f"Analyze '{food_name_normalized}'. Return JSON: {{ \"food_name\": \"{food_name_normalized}\", \"estimated_calories\": 0, \"protein\": 0, \"carbs\": 0, \"fat\": 0, \"ingredients\": [] }}"
+            # 2. AI Fetch
+            prompt = f"Analyze '{food_name_normalized}'. JSON: {{ \"food_name\": \"{food_name_normalized}\", \"estimated_calories\": 0, \"protein\": 0, \"carbs\": 0, \"fat\": 0, \"ingredients\": [] }}"
             
             if GOOGLE_KEY:
-                genai.configure(api_key=GOOGLE_KEY)
                 try:
+                    genai.configure(api_key=GOOGLE_KEY)
                     model = genai.GenerativeModel('gemini-2.0-flash-exp')
                     res = model.generate_content(prompt)
                     data = safe_json_extract(res.text)
-                    if data: source_used = "Google Text (Gemini 2.0)"
+                    if data: source_used = "Google Text"
                 except: pass
 
             if not data and OPENROUTER_KEY:
@@ -164,16 +132,10 @@ class ScanFoodView(APIView):
                     )
                     data = safe_json_extract(res.choices[0].message.content)
                     source_used = "OpenRouter Text"
-                except: 
-                    # Soft Landing
-                    data = {"food_name": food_name_normalized.title(), "estimated_calories": 0, "protein": 0, "carbs": 0, "fat": 0, "ingredients": [], "confidence_score": 0}
-                    source_used = "Manual Entry (AI Failed)"
+                except: pass
 
-        # SAVE & RETURN
         if data:
             name = normalize_food_name(data.get('food_name', 'Unknown'))
-            if len(name) < 3 or name.isnumeric(): return Response({"error": "Scan unclear"}, status=422)
-
             try:
                 c_raw = str(data.get('estimated_calories', 0))
                 c_clean = "".join(filter(str.isdigit, c_raw))
@@ -182,17 +144,29 @@ class ScanFoodView(APIView):
                 carbs = float(data.get('carbs', 0))
                 fat = float(data.get('fat', 0))
                 ingredients = data.get('ingredients', [])
-                conf = int(data.get('confidence_score', 80))
-            except: cals, prot, carbs, fat, ingredients, conf = 0, 0, 0, 0, [], 0
+            except: cals, prot, carbs, fat, ingredients = 0, 0, 0, 0, []
 
-            if name != "unknown" and cals > 0 and "Manual" not in source_used:
-                fk, _ = FoodKnowledge.objects.update_or_create(
-                    name=name,
-                    defaults={'calories': cals, 'protein': prot, 'carbs': carbs, 'fat': fat, 'ingredients': ingredients, 'confidence_score': conf, 'source': source_used}
+            if name != "unknown":
+                # --- FIX: SAFE CACHE UPDATE ---
+                # Only update global knowledge if we found valid calories (>0)
+                # This prevents AI hallucinations (0 cal) from poisoning the DB
+                fk = None
+                if cals > 0:
+                    fk, _ = FoodKnowledge.objects.update_or_create(
+                        name=name,
+                        defaults={'calories': cals, 'protein': prot, 'carbs': carbs, 'fat': fat, 'ingredients': ingredients, 'source': source_used}
+                    )
+                else:
+                    # If AI failed to get cals, try to find existing knowledge without overwriting
+                    fk = FoodKnowledge.objects.filter(name=name).first()
+
+                # Create user log regardless
+                FoodItem.objects.create(
+                    user=request.user if request.user.is_authenticated else None, 
+                    name=name.title(), 
+                    calories=cals, protein=prot, carbs=carbs, fat=fat, 
+                    knowledge_source=fk
                 )
-                FoodItem.objects.create(user=request.user if request.user.is_authenticated else None, name=name.title(), calories=cals, protein=prot, carbs=carbs, fat=fat, knowledge_source=fk)
-            elif name != "unknown": 
-                FoodItem.objects.create(user=request.user if request.user.is_authenticated else None, name=name.title(), calories=0, protein=0, carbs=0, fat=0)
 
             return Response({
                 "message": "Success", 
@@ -200,12 +174,10 @@ class ScanFoodView(APIView):
                 "source": source_used
             })
         
-        # FINAL SAFETY NET
-        print("❌ ALL AIs FAILED. Returning 422 to Client.")
-        return Response({"error": "AI Busy. Please enter food manually."}, 422)
+        return Response({"error": "AI Busy. Manual entry required."}, 422)
 
 # =========================================================================
-# 5. SMART MEAL PLANNER (Fix: Trusts App Data)
+# 2. SMART MEAL PLANNER (Mistral Fallback + App Priority)
 # =========================================================================
 @csrf_exempt
 @api_view(['POST'])
@@ -214,77 +186,50 @@ def generate_meal_plan(request):
     if not user: return Response({"error": "No user profile"}, 400)
     profile, _ = UserProfile.objects.get_or_create(user=user)
     
-    # 1. Get Data from App (TRUST THIS over DB default)
-    context = request.data.get('activity_context', 'Standard Day')
-    ingredients = request.data.get('available_ingredients', [])
+    # 1. PRIORITY: App Data > DB Data
+    print("🍱 MEAL PLAN REQUEST:")
+    print(f"   - App Calories: {request.data.get('daily_calories')}")
+    print(f"   - Context: {request.data.get('activity_context')}")
     
-    # Get target from App request, fallback to DB, fallback to 2000
     app_target = request.data.get('daily_calories')
-    daily_target = int(app_target) if app_target else (profile.daily_calorie_target or 2000)
-    
-    # 2. Calculate Calories
+    daily_target = int(app_target) if app_target else (profile.daily_calorie_target or 2200)
+    context = request.data.get('activity_context', 'Standard')
+    ingredients = request.data.get('available_ingredients', [])
+
     today = timezone.now().date()
-    # Use Django's localtime() which respects settings.TIME_ZONE (Asia/Kolkata)
     current_hour = timezone.localtime().hour 
-    
     eaten_today = FoodItem.objects.filter(created_at__date=today)
     total_eaten = sum(item.calories for item in eaten_today)
-    
     remaining_cals = daily_target - total_eaten
     
-    print(f"🧮 Planner Debug: Target {daily_target} - Eaten {total_eaten} = Remaining {remaining_cals}")
-
-    # 3. Handle "Full" State (Don't return empty, return light option)
-    if remaining_cals <= 100:
-        return Response({
-            "analysis": "You have hit your calorie goal! Just stay hydrated.",
-            "meals": [
-                 { 
-                   "name": "Green Tea or Water", 
-                   "calories": 0, "protein": 0, "carbs": 0, "fat": 0, 
-                   "time": "Evening",
-                   "ingredients": ["Water", "Tea Bag"],
-                   "recipe": ["Boil water", "Steep tea"]
-                }
-            ]
-        })
-
-    # 4. Prompt Engineering
-    time_instruction = f"It is {current_hour}:00."
-    if current_hour > 21: time_instruction += " Late Night. Suggest ONLY light milk/snacks."
-    elif current_hour > 15: time_instruction += " Lunch is over. Suggest Dinner & Snack."
-    elif current_hour < 11: time_instruction += " Morning. Suggest Lunch & Dinner."
-
-    context_instruction = "Balanced Diet."
-    if "Lifting" in context: context_instruction = "High Protein for muscle recovery."
-    elif "Exam" in context: context_instruction = "Brain Food (Nuts, Omega-3)."
-    elif "Rest" in context: context_instruction = "Low Carb, High Volume."
-
-    ingredient_instruction = ""
-    if ingredients:
-        ingredient_instruction = f"MUST use: {', '.join(ingredients)}."
+    print(f"   - Gap: {remaining_cals} kcal")
 
     prompt = f"""
-    Act as an elite Indian Sports Nutritionist.
+    Act as a Michelin Star Nutritionist.
     
-    USER STATS:
+    CLIENT DATA:
     - Target: {daily_target} kcal
-    - Remaining Gap: {remaining_cals} kcal (FILL THIS GAP).
-    - Time: {time_instruction}
-    - Context: {context_instruction}
-    - Pantry: {ingredient_instruction}
+    - Eaten: {total_eaten} kcal
+    - REMAINING TO FILL: {remaining_cals} kcal (Important!)
+    - Current Time: {current_hour}:00
+    - Mode: {context} (Adjust macros based on this).
+    - Pantry: {', '.join(ingredients) if ingredients else 'Any common ingredients'}
     
-    TASK: Plan meals to hit the remaining calories.
-    OUTPUT STRICT JSON:
+    INSTRUCTIONS:
+    1. If remaining calories are low (< 200), suggest a light snack.
+    2. If remaining calories are high (> 600), suggest a full meal.
+    3. Use the Pantry ingredients if possible.
+    
+    OUTPUT JSON ONLY:
     {{
-      "analysis": "Reason for choices.",
+      "analysis": "1 sentence on why this fits.",
       "meals": [
         {{ 
-           "name": "Dish Name", 
-           "calories": 300, "protein": 10, "carbs": 20, "fat": 5, 
+           "name": "Creative Dish Name", 
+           "calories": 450, "protein": 25, "carbs": 40, "fat": 15, 
            "time": "Dinner",
-           "ingredients": ["Item1"],
-           "recipe": ["Step 1"]
+           "ingredients": ["Item 1", "Item 2"],
+           "recipe": ["Step 1", "Step 2"]
         }}
       ]
     }}
@@ -292,19 +237,34 @@ def generate_meal_plan(request):
     
     plan_text = None
 
-    # AI GENERATION (Google -> OpenRouter)
+    # ATTEMPT 1: Google Gemini 2.0 (Fastest)
     if GOOGLE_KEY:
         try:
+            print("   -> Trying Google Gemini 2.0...")
             genai.configure(api_key=GOOGLE_KEY)
             m = genai.GenerativeModel('gemini-2.0-flash-exp')
             plan_text = m.generate_content(prompt).text
-        except Exception as e: print(f"Google Error: {e}")
+        except Exception as e: print(f"   x Google Failed: {e}")
 
+    # ATTEMPT 2: OpenRouter (Gemini)
     if not plan_text and OPENROUTER_KEY:
         try:
+            print("   -> Trying OpenRouter Gemini...")
             client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
             res = client.chat.completions.create(
                 model="google/gemini-2.0-flash-exp:free", 
+                messages=[{"role": "user", "content": prompt}]
+            )
+            plan_text = res.choices[0].message.content
+        except: pass
+
+    # ATTEMPT 3: OpenRouter (MISTRAL 7B - Reliable JSON)
+    if not plan_text and OPENROUTER_KEY:
+        try:
+            print("   -> Trying MISTRAL (Fallback)...")
+            client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
+            res = client.chat.completions.create(
+                model="mistralai/mistral-7b-instruct:free", 
                 messages=[{"role": "user", "content": prompt}]
             )
             plan_text = res.choices[0].message.content
@@ -315,13 +275,16 @@ def generate_meal_plan(request):
         if data and "meals" in data:
             return Response(data)
 
-    # Fallback
+    print("   ⚠️ Sending Hard Fallback Meal")
     return Response({
-        "analysis": "AI busy. Here is a safe default.",
+        "analysis": "AI was unreachable. Here is a balanced default option.",
         "meals": [
             { 
-                "name": "Oats & Milk", "calories": 300, "protein": 10, "carbs": 40, "fat": 8, "time": "Anytime",
-                "ingredients": ["Oats", "Milk"], "recipe": ["Boil and eat"]
+                "name": "Quick Protein Oats", 
+                "calories": 300, "protein": 15, "carbs": 35, "fat": 6, 
+                "time": "Anytime",
+                "ingredients": ["Oats", "Milk", "Peanut Butter"],
+                "recipe": ["Boil oats in milk.", "Stir in peanut butter.", "Serve warm."]
             }
         ]
     })
@@ -350,7 +313,7 @@ def swap_meal(request):
     })
 
 # ==========================================
-# 3. ROSTER ANALYZER (Failover: Gemini -> Pixtral)
+# 3. ROSTER ANALYZER (Google -> Qwen-2-VL)
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):
@@ -371,7 +334,6 @@ class AnalyzeRosterView(APIView):
         """
         data = None
 
-        # 1. Try Google Direct (Gemini 2.0)
         if GOOGLE_KEY:
             try:
                 print("📅 Analyzing Roster with Gemini 2.0...")
@@ -379,14 +341,11 @@ class AnalyzeRosterView(APIView):
                 m = genai.GenerativeModel('gemini-2.0-flash-exp')
                 r = m.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt])
                 if r.text: data = safe_json_extract(r.text)
-            except Exception as e:
-                print(f"⚠️ Google Roster Failed: {e}")
+            except Exception as e: print(f"⚠️ Google Roster Failed: {e}")
 
-        # 2. OpenRouter Fallback chain
         if not data and OPENROUTER_KEY:
             try:
                 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
-                # Backup A: Gemini 2.0 via OpenRouter
                 try:
                     print("📅 Switching to OpenRouter (Gemini)...")
                     res = client.chat.completions.create(
@@ -395,19 +354,14 @@ class AnalyzeRosterView(APIView):
                     )
                     data = safe_json_extract(res.choices[0].message.content)
                 except: 
-                    print("⚠️ OpenRouter Gemini Failed.")
-
-                # Backup B: Mistral Pixtral 12B (Great for Text/OCR)
-                if not data:
-                    print("📅 Switching to Mistral Pixtral 12B...")
+                    # --- FIX: SWAP PIXTRAL FOR QWEN-2-VL ---
+                    print("⚠️ OpenRouter Gemini Failed. Trying Qwen-2-VL (More Stable)...")
                     res = client.chat.completions.create(
-                        model="mistralai/pixtral-12b:free", 
+                        model="qwen/qwen-2-vl-7b-instruct:free", 
                         messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
                     )
                     data = safe_json_extract(res.choices[0].message.content)
-
-            except Exception as e:
-                print(f"⚠️ OpenRouter Fallback Failed: {e}")
+            except Exception as e: print(f"⚠️ OpenRouter Failed: {e}")
 
         if data: return Response(data)
         return Response({"error": "Busy. Please try again in 1 minute."}, 503)
