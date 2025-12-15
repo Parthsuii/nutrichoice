@@ -1,19 +1,26 @@
 from django.urls import path
 from . import views
-from django.views.decorators.csrf import csrf_exempt
-
 
 urlpatterns = [
-    path('foods/', views.FoodItemList.as_view()),
-    path('foods/<int:pk>/', views.FoodItemDetail.as_view()),
-    path('ask-ai/', views.ask_nutritionist),
-    path('scan-food/', views.ScanFoodView.as_view()),
-    path('profile/', views.user_profile_view),
-    path('generate-meal-plan', views.generate_meal_plan),
-    path('swap-meal', views.swap_meal),
-    path('scan-food/', csrf_exempt(views.ScanFoodView.as_view())),
-    path('analyze-roster', csrf_exempt(views.AnalyzeRosterView.as_view())),
+    # --- 1. CORE AI ENDPOINTS ---
+    # This single view handles BOTH Image Uploads (Camera) and Text Search
+    path('scan-food/', views.ScanFoodView.as_view(), name='scan-food'),
+    
+    # Roster/Timetable Scanner
+    path('analyze-roster/', views.AnalyzeRosterView.as_view(), name='analyze-roster'),
+    
+    # AI Chat/Q&A
+    path('ask-ai/', views.ask_nutritionist, name='ask-nutritionist'),
+    
+    # Diagnostic (Check if Google/OpenRouter keys are working)
     path('ai-check/', views.ai_status_check, name='ai-status-check'),
-    path('analyze-roster/', csrf_exempt(views.AnalyzeRosterView.as_view()), name='analyze-roster-with-slash'),
-]
 
+    # --- 2. DATA ENDPOINTS ---
+    path('foods/', views.FoodItemList.as_view(), name='food-list'),
+    path('foods/<int:pk>/', views.FoodItemDetail.as_view(), name='food-detail'),
+    
+    # --- 3. USER ENDPOINTS ---
+    path('profile/', views.user_profile_view, name='user-profile'),
+    path('generate-meal-plan/', views.generate_meal_plan, name='generate-meal-plan'),
+    path('swap-meal/', views.swap_meal, name='swap-meal'),
+]

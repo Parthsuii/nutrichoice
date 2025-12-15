@@ -18,6 +18,7 @@ from django.contrib import admin
 from django.urls import path,include
 from app import views  # <--- Import your views from the 'app' folder
 
+
 urlpatterns = [
     path('admin/', admin.site.urls),
 
@@ -32,4 +33,5 @@ urlpatterns = [
     path('generate-workout', views.generate_workout, name='generate_workout'),
     path('admin/', admin.site.urls),
     path('api/', include('store.urls')),
+    
 ]
