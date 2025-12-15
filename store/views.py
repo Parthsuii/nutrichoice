@@ -205,7 +205,7 @@ class ScanFoodView(APIView):
         return Response({"error": "AI Busy. Please enter food manually."}, 422)
 
 # =========================================================================
-# 2. SMART MEAL PLANNER (Context, Time & Recipe Aware)
+# 5. SMART MEAL PLANNER (Fix: Trusts App Data)
 # =========================================================================
 @csrf_exempt
 @api_view(['POST'])
@@ -214,70 +214,77 @@ def generate_meal_plan(request):
     if not user: return Response({"error": "No user profile"}, 400)
     profile, _ = UserProfile.objects.get_or_create(user=user)
     
-    # 1. Get Context from App
+    # 1. Get Data from App (TRUST THIS over DB default)
     context = request.data.get('activity_context', 'Standard Day')
     ingredients = request.data.get('available_ingredients', [])
     
+    # Get target from App request, fallback to DB, fallback to 2000
+    app_target = request.data.get('daily_calories')
+    daily_target = int(app_target) if app_target else (profile.daily_calorie_target or 2000)
+    
     # 2. Calculate Calories
     today = timezone.now().date()
-    
-    # --- TIMEZONE FIX ---
     # Use Django's localtime() which respects settings.TIME_ZONE (Asia/Kolkata)
     current_hour = timezone.localtime().hour 
     
     eaten_today = FoodItem.objects.filter(created_at__date=today)
     total_eaten = sum(item.calories for item in eaten_today)
-    remaining_cals = profile.daily_calorie_target - total_eaten
     
-    # 3. Handle End of Day
-    if remaining_cals <= 0:
+    remaining_cals = daily_target - total_eaten
+    
+    print(f"🧮 Planner Debug: Target {daily_target} - Eaten {total_eaten} = Remaining {remaining_cals}")
+
+    # 3. Handle "Full" State (Don't return empty, return light option)
+    if remaining_cals <= 100:
         return Response({
-            "message": "Goal Hit!", 
-            "analysis": "You have hit your calorie target for the day! Great job.",
-            "meals": []
+            "analysis": "You have hit your calorie goal! Just stay hydrated.",
+            "meals": [
+                 { 
+                   "name": "Green Tea or Water", 
+                   "calories": 0, "protein": 0, "carbs": 0, "fat": 0, 
+                   "time": "Evening",
+                   "ingredients": ["Water", "Tea Bag"],
+                   "recipe": ["Boil water", "Steep tea"]
+                }
+            ]
         })
 
-    # 4. Prompt Engineering (The Brains)
-    
-    # A. Time Logic
+    # 4. Prompt Engineering
     time_instruction = f"It is {current_hour}:00."
-    if current_hour > 21: time_instruction += " Late Night. Suggest only light milk/snacks."
+    if current_hour > 21: time_instruction += " Late Night. Suggest ONLY light milk/snacks."
     elif current_hour > 15: time_instruction += " Lunch is over. Suggest Dinner & Snack."
     elif current_hour < 11: time_instruction += " Morning. Suggest Lunch & Dinner."
 
-    # B. Context Logic
     context_instruction = "Balanced Diet."
-    if "Lifting" in context: context_instruction = "High Protein for muscle recovery. Moderate Carbs."
-    elif "Exam" in context: context_instruction = "Brain Food (Nuts, Omega-3). No heavy sugar crashes."
-    elif "Cardio" in context: context_instruction = "Electrolytes & Carbs for energy."
-    elif "Rest" in context: context_instruction = "Low Carb, High Volume (Fiber/Veggies)."
+    if "Lifting" in context: context_instruction = "High Protein for muscle recovery."
+    elif "Exam" in context: context_instruction = "Brain Food (Nuts, Omega-3)."
+    elif "Rest" in context: context_instruction = "Low Carb, High Volume."
 
-    # C. Ingredient Logic
     ingredient_instruction = ""
     if ingredients:
-        ingredient_instruction = f"URGENT: You MUST try to incorporate these: {', '.join(ingredients)}."
+        ingredient_instruction = f"MUST use: {', '.join(ingredients)}."
 
     prompt = f"""
     Act as an elite Indian Sports Nutritionist.
     
     USER STATS:
-    - Goal: {profile.goal}
-    - Remaining Calories: {remaining_cals} kcal.
-    - Context: {context_instruction}
+    - Target: {daily_target} kcal
+    - Remaining Gap: {remaining_cals} kcal (FILL THIS GAP).
     - Time: {time_instruction}
+    - Context: {context_instruction}
     - Pantry: {ingredient_instruction}
     
-    TASK: Plan specific meals to fill the gap.
+    TASK: Plan meals to hit the remaining calories.
     OUTPUT STRICT JSON:
     {{
-      "analysis": "Brief reason for choices based on context.",
+      "analysis": "Reason for choices.",
       "meals": [
         {{ 
            "name": "Dish Name", 
-           "calories": 0, "protein": 0, "carbs": 0, "fat": 0, 
+           "calories": 300, "protein": 10, "carbs": 20, "fat": 5, 
            "time": "Dinner",
-           "ingredients": ["Item1", "Item2"],
-           "recipe": ["Step 1", "Step 2", "Step 3"]
+           "ingredients": ["Item1"],
+           "recipe": ["Step 1"]
         }}
       ]
     }}
@@ -285,19 +292,16 @@ def generate_meal_plan(request):
     
     plan_text = None
 
-    # ATTEMPT 1: Google Gemini 2.0
+    # AI GENERATION (Google -> OpenRouter)
     if GOOGLE_KEY:
         try:
-            print(f"🍱 Planning for {context} at {current_hour}:00...")
             genai.configure(api_key=GOOGLE_KEY)
             m = genai.GenerativeModel('gemini-2.0-flash-exp')
             plan_text = m.generate_content(prompt).text
-        except: pass
+        except Exception as e: print(f"Google Error: {e}")
 
-    # ATTEMPT 2: OpenRouter
     if not plan_text and OPENROUTER_KEY:
         try:
-            print("🍱 Switching to OpenRouter...")
             client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
             res = client.chat.completions.create(
                 model="google/gemini-2.0-flash-exp:free", 
@@ -313,13 +317,11 @@ def generate_meal_plan(request):
 
     # Fallback
     return Response({
-        "analysis": "Server busy, here is a standard plan.",
+        "analysis": "AI busy. Here is a safe default.",
         "meals": [
             { 
-                "name": "Oats with Milk & Nuts", 
-                "calories": 300, "protein": 10, "carbs": 40, "fat": 8, "time": "Anytime",
-                "ingredients": ["Oats", "Milk", "Almonds"],
-                "recipe": ["Boil milk", "Add oats", "Cook 5 mins"]
+                "name": "Oats & Milk", "calories": 300, "protein": 10, "carbs": 40, "fat": 8, "time": "Anytime",
+                "ingredients": ["Oats", "Milk"], "recipe": ["Boil and eat"]
             }
         ]
     })
