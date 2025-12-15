@@ -52,7 +52,7 @@ def safe_json_extract(text):
     except: return None
 
 # =========================================================================
-# SMART SCANNER (Gemini 2.0+ Only)
+# SMART SCANNER (Debug Mode Enabled)
 # =========================================================================
 @method_decorator(csrf_exempt, name='dispatch')
 class ScanFoodView(APIView):
@@ -74,16 +74,14 @@ class ScanFoodView(APIView):
             b64 = encode_image(image_file)
             prompt = """Analyze this food. Return STRICT JSON: { "food_name": "Paneer", "estimated_calories": 300, "protein": 10, "carbs": 20, "fat": 15, "ingredients": ["paneer"], "confidence_score": 90 }"""
             
-            # 1. Try Google Direct (Gemini 2.0 Only)
+            # 1. Try Google Direct
             if GOOGLE_KEY:
-                # REMOVED: gemini-1.5-flash
-                # KEPT: Only 2.0 Flash Exp
                 models_to_try = ['gemini-2.0-flash-exp']
                 genai.configure(api_key=GOOGLE_KEY)
                 
                 for model_name in models_to_try:
                     try:
-                        print(f"Trying Google Model: {model_name}...")
+                        print(f"🔹 Google: Trying {model_name}...")
                         model = genai.GenerativeModel(model_name)
                         res = model.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt])
                         if res.text:
@@ -91,32 +89,37 @@ class ScanFoodView(APIView):
                             source_used = f"Google Vision ({model_name})"
                             break 
                     except Exception as e:
-                        print(f"⚠️ {model_name} Failed: {e}")
+                        print(f"⚠️ Google Failed: {str(e)[:100]}") # Print first 100 chars of error
                         continue 
 
-            # 2. OpenRouter Fallback (Using Gemini 2.0 or Llama 3.2 as Backup)
-            if not data and OPENROUTER_KEY:
-                try:
-                    print("🔄 Google Failed. Trying OpenRouter (Gemini 2.0)...")
-                    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
-                    res = client.chat.completions.create(
-                        model="google/gemini-2.0-flash-exp:free", # Primary OpenRouter Choice
-                        messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
-                    )
-                    data = safe_json_extract(res.choices[0].message.content)
-                    source_used = "OpenRouter Vision"
-                except: 
-                    # Tertiary Backup: Llama 3.2 Vision (Completely different AI)
+            # 2. OpenRouter Fallback
+            if not data:
+                if not OPENROUTER_KEY:
+                    print("❌ OpenRouter Skipped: No API Key found in Environment!")
+                else:
                     try:
-                        print("🔄 Gemini Failed. Trying Llama 3.2...")
+                        print("🔄 Trying OpenRouter (Gemini 2.0)...")
                         client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
                         res = client.chat.completions.create(
-                            model="meta-llama/llama-3.2-90b-vision-instruct:free",
+                            model="google/gemini-2.0-flash-exp:free",
                             messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
                         )
                         data = safe_json_extract(res.choices[0].message.content)
-                        source_used = "OpenRouter Vision (Llama)"
-                    except: pass
+                        source_used = "OpenRouter Vision"
+                    except Exception as e: 
+                        print(f"❌ OpenRouter Gemini Error: {e}") # <--- PRINTS EXACT ERROR
+                        
+                        # Tertiary Backup: Llama 3.2
+                        try:
+                            print("🔄 Trying OpenRouter (Llama 3.2)...")
+                            res = client.chat.completions.create(
+                                model="meta-llama/llama-3.2-90b-vision-instruct:free",
+                                messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
+                            )
+                            data = safe_json_extract(res.choices[0].message.content)
+                            source_used = "OpenRouter Vision (Llama)"
+                        except Exception as e2:
+                             print(f"❌ OpenRouter Llama Error: {e2}") # <--- PRINTS EXACT ERROR
 
         # PATH B: TEXT ONLY
         elif text_query:
@@ -146,7 +149,6 @@ class ScanFoodView(APIView):
             if GOOGLE_KEY:
                 genai.configure(api_key=GOOGLE_KEY)
                 try:
-                    # Only using 2.0
                     model = genai.GenerativeModel('gemini-2.0-flash-exp')
                     res = model.generate_content(prompt)
                     data = safe_json_extract(res.text)
@@ -162,7 +164,7 @@ class ScanFoodView(APIView):
                     )
                     data = safe_json_extract(res.choices[0].message.content)
                     source_used = "OpenRouter Text"
-                except Exception as e: 
+                except: 
                     # Soft Landing
                     data = {"food_name": food_name_normalized.title(), "estimated_calories": 0, "protein": 0, "carbs": 0, "fat": 0, "ingredients": [], "confidence_score": 0}
                     source_used = "Manual Entry (AI Failed)"
@@ -197,11 +199,13 @@ class ScanFoodView(APIView):
                 "saved_data": { "id": 0, "food_name": name.title(), "estimated_calories": cals, "protein": prot, "carbs": carbs, "fat": fat, "ingredients": ingredients }, 
                 "source": source_used
             })
-
-        return Response({"error": "Scan Failed"}, 500)
+        
+        # FINAL SAFETY NET
+        print("❌ ALL AIs FAILED. Returning 422 to Client.")
+        return Response({"error": "AI Busy. Please enter food manually."}, 422)
 
 # =========================================================================
-# 5. SMART MEAL PLANNER (Logic Updated: No 1.5)
+# 5. SMART MEAL PLANNER
 # =========================================================================
 @csrf_exempt
 @api_view(['POST'])
@@ -232,45 +236,30 @@ def generate_meal_plan(request):
     
     plan_text = None
 
-    # ATTEMPT 1: Google Gemini 2.0 (Only)
     if GOOGLE_KEY:
         try:
             print("🍱 Planning with Gemini 2.0...")
             genai.configure(api_key=GOOGLE_KEY)
             m = genai.GenerativeModel('gemini-2.0-flash-exp')
             plan_text = m.generate_content(prompt).text
-        except Exception as e:
-            print(f"⚠️ Gemini 2.0 Failed: {e}")
-            # No fallback to 1.5, direct to OpenRouter
+        except: pass
 
-    # ATTEMPT 2: OpenRouter (Gemini 2.0)
     if not plan_text and OPENROUTER_KEY:
         try:
-            print("🍱 Switching to OpenRouter (Gemini 2.0)...")
+            print("🍱 Switching to OpenRouter...")
             client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
             res = client.chat.completions.create(
                 model="google/gemini-2.0-flash-exp:free", 
                 messages=[{"role": "user", "content": prompt}]
             )
             plan_text = res.choices[0].message.content
-        except:
-             # ATTEMPT 3: OpenRouter (Llama 3.2 - Different AI Backup)
-             try:
-                print("🍱 Switching to Llama 3.2...")
-                client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
-                res = client.chat.completions.create(
-                    model="meta-llama/llama-3.2-90b-vision-instruct:free", 
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                plan_text = res.choices[0].message.content
-             except: pass
+        except: pass
 
     if plan_text:
         data = safe_json_extract(plan_text)
         if data and "meals" in data:
             return Response(data)
 
-    # Hard Fallback
     return Response({
         "meals": [
             { "name": "Oats with Milk (Fallback Plan)", "calories": 300, "protein": 10, "carbs": 40, "fat": 8, "time": "Anytime" },
@@ -287,7 +276,7 @@ def swap_meal(request):
     try:
         if GOOGLE_KEY:
             genai.configure(api_key=GOOGLE_KEY)
-            m = genai.GenerativeModel('gemini-2.0-flash-exp') # Updated to 2.0
+            m = genai.GenerativeModel('gemini-2.0-flash-exp') 
             res = m.generate_content(prompt)
             data = safe_json_extract(res.text)
             if data: return Response(data)
@@ -310,7 +299,7 @@ class AnalyzeRosterView(APIView):
         if GOOGLE_KEY:
             genai.configure(api_key=GOOGLE_KEY)
             try:
-                m = genai.GenerativeModel('gemini-2.0-flash-exp') # Updated to 2.0
+                m = genai.GenerativeModel('gemini-2.0-flash-exp')
                 r = m.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt])
                 if r.text: return Response(safe_json_extract(r.text))
             except: pass
@@ -343,7 +332,7 @@ def ask_nutritionist(request):
     try:
         if GOOGLE_KEY:
             genai.configure(api_key=GOOGLE_KEY)
-            m = genai.GenerativeModel('gemini-2.0-flash-exp') # 2.0 Only
+            m = genai.GenerativeModel('gemini-2.0-flash-exp') 
             return Response({"answer": m.generate_content(q).text})
     except: return Response({"error": "AI Error"}, 500)
 
