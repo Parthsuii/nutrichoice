@@ -233,7 +233,7 @@ def generate_meal_plan(request):
     if remaining_cals <= 0:
         return Response({
             "message": "Goal Hit!", 
-            "analysis": "You have hit your calorie target for the day!",
+            "analysis": "You have hit your calorie target for the day! Great job.",
             "meals": []
         })
 
@@ -247,28 +247,30 @@ def generate_meal_plan(request):
 
     # B. Context Logic
     context_instruction = "Balanced Diet."
-    if "Lifting" in context: context_instruction = "High Protein for muscle recovery."
-    elif "Exam" in context: context_instruction = "Brain Food (Nuts, Omega-3). No sugar crash."
-    elif "Cardio" in context: context_instruction = "Electrolytes & Carbs."
-    elif "Rest" in context: context_instruction = "Low Carb, High Volume (Fiber)."
+    if "Lifting" in context: context_instruction = "High Protein for muscle recovery. Moderate Carbs."
+    elif "Exam" in context: context_instruction = "Brain Food (Nuts, Omega-3). No heavy sugar crashes."
+    elif "Cardio" in context: context_instruction = "Electrolytes & Carbs for energy."
+    elif "Rest" in context: context_instruction = "Low Carb, High Volume (Fiber/Veggies)."
 
     # C. Ingredient Logic
     ingredient_instruction = ""
     if ingredients:
-        ingredient_instruction = f"MUST use: {', '.join(ingredients)}."
+        ingredient_instruction = f"URGENT: You MUST try to incorporate these: {', '.join(ingredients)}."
 
     prompt = f"""
     Act as an elite Indian Sports Nutritionist.
     
-    USER: Goal {profile.goal}, Remaining {remaining_cals} kcal.
-    CONTEXT: {context_instruction}
-    TIME: {time_instruction}
-    PANTRY: {ingredient_instruction}
+    USER STATS:
+    - Goal: {profile.goal}
+    - Remaining Calories: {remaining_cals} kcal.
+    - Context: {context_instruction}
+    - Time: {time_instruction}
+    - Pantry: {ingredient_instruction}
     
     TASK: Plan specific meals to fill the gap.
     OUTPUT STRICT JSON:
     {{
-      "analysis": "Brief reason for choices.",
+      "analysis": "Brief reason for choices based on context.",
       "meals": [
         {{ 
            "name": "Dish Name", 
