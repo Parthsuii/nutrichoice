@@ -33,5 +33,6 @@ urlpatterns = [
     path('generate-workout', views.generate_workout, name='generate_workout'),
     path('admin/', admin.site.urls),
     path('api/', include('store.urls')),
-    
+    path('generate-workout/', views.generate_workout, name='generate_workout'),
 ]
+    
