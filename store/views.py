@@ -50,7 +50,7 @@ def safe_json_extract(text):
     except: return None
 
 # =========================================================================
-# 1. SMART SCANNER (Google Direct -> Mistral Direct -> OpenRouter)
+# 1. SMART SCANNER (Google -> Mistral -> OpenRouter)
 # =========================================================================
 @method_decorator(csrf_exempt, name='dispatch')
 class ScanFoodView(APIView):
@@ -195,7 +195,7 @@ class ScanFoodView(APIView):
         return Response({"error": "AI Busy. Manual entry required."}, 422)
 
 # =========================================================================
-# 2. SMART MEAL PLANNER (Multi-Meal Schedule Logic)
+# 2. SMART MEAL PLANNER (With Recipe & Macros)
 # =========================================================================
 @csrf_exempt
 @api_view(['POST'])
@@ -221,37 +221,41 @@ def generate_meal_plan(request):
 
     pantry_text = ", ".join(ingredients) if ingredients else "Simple ingredients"
     
-    # 2. DETERMINE SCHEDULE (Critical Step)
-    # This instructs the AI to generate multiple meals based on time
-    meal_instruction = "Generate a full schedule (at least 3 meals: Breakfast, Lunch, Dinner)."
+    # 2. DETERMINE SCHEDULE (Force Multi-Meal)
+    meal_instruction = "Generate at least 3 meals (Breakfast, Lunch, Dinner)."
     if current_hour > 20:
-        meal_instruction = "Late Night: Generate 1 light snack or recovery drink."
+        meal_instruction = "Late Night: Generate 1 light snack."
     elif current_hour > 14:
-        meal_instruction = "Afternoon: Generate 2 distinct items: an Afternoon Snack and a Dinner."
+        meal_instruction = "Afternoon: Generate 2 meals (Snack + Dinner)."
     elif remaining_cals < 500:
-        meal_instruction = "Low Calorie Gap: Generate 2 small snacks/sides to hit the target."
+        meal_instruction = "Low Calorie: Generate 2 small snacks."
 
+    # 3. PROMPT (Strict Structure)
     prompt = f"""
-    You are a strictly compliant JSON API.
+    You are a professional Nutritionist API. Output strictly valid JSON.
     
-    TASK: Generate a meal plan schedule.
-    - REMAINING CALORIES: {remaining_cals} (Distribute these across the meals)
-    - CURRENT TIME: {current_hour}:00
-    - CONTEXT: {context}
-    - PANTRY: {pantry_text}
+    TASK: Plan meals to fill exactly {remaining_cals} calories.
+    - Current Time: {current_hour}:00
+    - Context: {context}
+    - Pantry: {pantry_text}
+    - Requirement: {meal_instruction}
 
-    RULES:
-    1. {meal_instruction} <--- FOLLOW THIS SCHEDULE
-    2. Do NOT output just one big meal unless it's Late Night.
-    3. Return valid JSON only.
-
-    OUTPUT FORMAT (Example):
+    REQUIRED JSON STRUCTURE (Must include 'nutrients' object and 'recipe' list):
     {{
-      "analysis": "1 short sentence analysis.",
+      "analysis": "Brief explanation.",
       "meals": [
-        {{ "name": "Breakfast Item", "calories": 400, "time": "Breakfast", "ingredients": ["Oats"], "recipe": ["Boil water"] }},
-        {{ "name": "Lunch Item", "calories": 600, "time": "Lunch", "ingredients": ["Rice"], "recipe": ["Cook rice"] }},
-        {{ "name": "Dinner Item", "calories": 500, "time": "Dinner", "ingredients": ["Chicken"], "recipe": ["Grill"] }}
+        {{
+           "name": "Dish Name",
+           "time": "Breakfast/Lunch/Dinner",
+           "calories": 400,
+           "nutrients": {{ "protein": 20, "carbs": 40, "fat": 10 }}, 
+           "ingredients": ["Item 1", "Item 2"],
+           "recipe": [
+              "Step 1: Prep ingredients.",
+              "Step 2: Cook method.",
+              "Step 3: Serve."
+           ]
+        }}
       ]
     }}
     """
@@ -272,7 +276,7 @@ def generate_meal_plan(request):
             ai_source = "Google Gemini"
         except Exception as e: print(f"   ❌ Google Failed: {e}")
 
-    # --- 2. MISTRAL DIRECT (Native) ---
+    # --- 2. MISTRAL DIRECT ---
     if not plan_text and MISTRAL_KEY:
         try:
             print("   👉 2. Trying Mistral Direct...")
@@ -280,7 +284,7 @@ def generate_meal_plan(request):
             res = client.chat.completions.create(
                 model="mistral-small-latest", 
                 messages=[
-                    {"role": "system", "content": "You are a JSON generator. Output valid JSON only. Generate a LIST of meals."}, 
+                    {"role": "system", "content": "You are a JSON generator. Always include 'nutrients' object and 'recipe' list."}, 
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"}
@@ -289,7 +293,7 @@ def generate_meal_plan(request):
             ai_source = "Mistral Direct"
         except Exception as e: print(f"   ❌ Mistral Failed: {e}")
 
-    # --- 3. OPENROUTER (Fallback) ---
+    # --- 3. OPENROUTER ---
     if not plan_text and OPENROUTER_KEY:
         try:
             print("   👉 3. Trying OpenRouter Fallback...")
@@ -305,23 +309,28 @@ def generate_meal_plan(request):
     if plan_text:
         print(f"   ✅ AI Success via {ai_source}")
         data = safe_json_extract(plan_text)
-        # Check if we actually got a list of meals
         if data and "meals" in data and isinstance(data["meals"], list):
             return Response(data)
 
     print("   ⚠️ Sending Hard Fallback Meal")
     return Response({
-        "analysis": "AI busy. Here is a balanced default schedule.",
+        "analysis": "AI busy. Here is a complete default plan.",
         "meals": [
             { 
-                "name": "Oats with Milk", 
-                "calories": 300, "protein": 10, "carbs": 40, "fat": 6, "time": "Breakfast",
-                "ingredients": ["Oats", "Milk"], "recipe": ["Boil oats"]
+                "name": "Masala Oats & Milk", 
+                "time": "Breakfast",
+                "calories": 350, 
+                "nutrients": { "protein": 12, "carbs": 45, "fat": 8 },
+                "ingredients": ["Oats", "Milk", "Vegetables", "Spices"],
+                "recipe": ["Boil milk and oats.", "Add chopped veggies and spices.", "Cook for 5 mins until thick."]
             },
             { 
-                "name": "Chickpea Salad", 
-                "calories": 400, "protein": 15, "carbs": 50, "fat": 10, "time": "Lunch",
-                "ingredients": ["Chickpeas", "Veggies"], "recipe": ["Mix all"]
+                "name": "Paneer Salad", 
+                "time": "Lunch",
+                "calories": 400, 
+                "nutrients": { "protein": 20, "carbs": 15, "fat": 25 },
+                "ingredients": ["Paneer", "Cucumber", "Tomato", "Lemon"],
+                "recipe": ["Cube the paneer.", "Chop vegetables.", "Toss everything with lemon juice and salt."]
             }
         ]
     })
@@ -333,7 +342,12 @@ def swap_meal(request):
     calories = request.data.get('calories', 500)
     context = request.data.get('context', 'Standard')
     
-    prompt = f"Suggest ONE vegetarian Indian replacement for '{old_meal}' (~{calories} kcal). Context: {context}. Return JSON: {{ \"name\": \"...\", \"calories\": {calories}, \"protein\": 0, \"carbs\": 0, \"fat\": 0, \"ingredients\": [], \"recipe\": [] }}"
+    prompt = f"""
+    Suggest replacement for '{old_meal}' (~{calories} kcal). Context: {context}. 
+    Return strictly nested JSON with 'nutrients' and 'recipe'.
+    
+    JSON: {{ "name": "...", "calories": {calories}, "nutrients": {{ "protein": 0, "carbs": 0, "fat": 0 }}, "ingredients": [], "recipe": ["Step 1", "Step 2"] }}
+    """
     
     plan_text = None
     if GOOGLE_KEY:
@@ -357,7 +371,8 @@ def swap_meal(request):
         if data: return Response(data)
 
     return Response({
-        "name": "Masala Oats", "calories": calories, "protein": 8, "carbs": 40, "fat": 5, 
+        "name": "Masala Oats", "calories": calories, 
+        "nutrients": { "protein": 8, "carbs": 40, "fat": 5 },
         "ingredients": ["Oats", "Spices"], "recipe": ["Boil water", "Add oats & spices"]
     })
 
