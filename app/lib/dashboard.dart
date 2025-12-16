@@ -6,7 +6,7 @@ import 'package:pedometer/pedometer.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 // --- IMPORTS ---
-import 'bio_checkin_screen.dart';      
+import 'bio_checkin_screen.dart';       
 import 'roster_screen.dart';
 import 'meal_log_screen.dart';
 import 'smart_meal_planner_screen.dart'; 
@@ -14,6 +14,24 @@ import 'body_map_screen.dart';
 import 'shopping_list_screen.dart'; 
 import 'workout_screen.dart'; 
 import 'stats_screen.dart'; 
+
+// --- CENTRALIZED CONSTANTS ---
+class AppKeys {
+  static const String lastActive = 'last_active_timestamp';
+  static const String sleepHours = 'last_sleep_hours';
+  static const String reflexScore = 'last_reflex_score';
+  static const String soreMuscles = 'sore_muscles';
+  static const String mealLogs = 'meal_logs';
+  static const String bioHistory = 'daily_bio_history';
+  static const String calorieTarget = 'daily_calorie_target';
+  static const String dynamicTarget = 'dynamic_calorie_target';
+}
+
+class BioThresholds {
+  static const int reflexFatigue = 350;
+  static const double sleepFatigue = 5.5;
+  static const int stepBaseline = 3000;
+}
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -23,6 +41,9 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> with WidgetsBindingObserver {
+  late SharedPreferences _prefs;
+  bool _prefsLoaded = false;
+
   // PROFILE DATA
   String _userName = "User";
   String _userGoal = "Maintain";
@@ -40,20 +61,30 @@ class _DashboardScreenState extends State<DashboardScreen> with WidgetsBindingOb
   double _sleepHours = 0.0;
   bool _isGhostMode = false;
   String _statusReason = "Ready";
-  String _sorenessStatus = "None"; // <--- NEW: Stores sore muscles string
+  String _sorenessStatus = "None";
 
   // STEP TRACKING
   late Stream<StepCount> _stepCountStream;
   int _steps = 0;
   int _initialSteps = -1;
-  int _simulatedSteps = 0; 
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _checkAutoSleep();
-    _loadBioData();
+    _initApp();
+  }
+
+  Future<void> _initApp() async {
+    _prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() => _prefsLoaded = true);
+    
+    await Future.wait([
+      _checkAutoSleep(),
+      _syncAllData(),
+    ]);
+    
     _initPedometer();
   }
 
@@ -65,178 +96,149 @@ class _DashboardScreenState extends State<DashboardScreen> with WidgetsBindingOb
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!_prefsLoaded) return;
     if (state == AppLifecycleState.paused) {
-      _saveLastActiveTime();
+      _prefs.setInt(AppKeys.lastActive, DateTime.now().millisecondsSinceEpoch);
     } else if (state == AppLifecycleState.resumed) {
       _checkAutoSleep();
     }
   }
 
-  Future<void> _saveLastActiveTime() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt('last_active_timestamp', DateTime.now().millisecondsSinceEpoch);
-  }
-
   Future<void> _checkAutoSleep() async {
-    final prefs = await SharedPreferences.getInstance();
-    int? lastActive = prefs.getInt('last_active_timestamp');
+    if (!_prefsLoaded) return;
+    int? lastActive = _prefs.getInt(AppKeys.lastActive);
 
     if (lastActive != null) {
       DateTime lastTime = DateTime.fromMillisecondsSinceEpoch(lastActive);
       DateTime now = DateTime.now();
-      Duration diff = now.difference(lastTime);
-      double hoursAway = diff.inMinutes / 60.0;
+      double hoursAway = now.difference(lastTime).inMinutes / 60.0;
 
-      if (hoursAway > 6.0) { 
-        await prefs.setDouble('last_sleep_hours', hoursAway);
+      double currentSleep = _prefs.getDouble(AppKeys.sleepHours) ?? 0.0;
+      
+      // LOGIC: Only detect if between 6h and 16h (Avoids "Coma Bug")
+      if (hoursAway > 6.0 && hoursAway < 16.0 && currentSleep == 0.0) { 
+        await _prefs.setDouble(AppKeys.sleepHours, hoursAway);
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text("😴 Detected ${hoursAway.toStringAsFixed(1)}h sleep."), backgroundColor: Colors.indigo)
         );
-        _loadBioData();
+        _syncAllData();
       }
     }
   }
 
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _loadBioData();
+  Future<void> _syncAllData() async {
+    if (!_prefsLoaded) return;
+    _syncProfile();
+    _syncBioMetrics();
+    _syncNutrition();
   }
 
-  void _initPedometer() async {
-    if (await Permission.activityRecognition.request().isGranted) {
-      _stepCountStream = Pedometer.stepCountStream;
-      _stepCountStream.listen(_onStepCount).onError(_onStepError);
-    }
+  void _syncProfile() {
+    _userName = _prefs.getString('user_name') ?? "User";
+    _userGoal = _prefs.getString('user_goal') ?? "Maintain";
+    _baseDailyTarget = _prefs.getInt(AppKeys.calorieTarget) ?? 2000;
+    _dynamicDailyTarget = _prefs.getInt(AppKeys.dynamicTarget) ?? _baseDailyTarget;
+    _recalcDynamicTarget();
   }
 
-  void _onStepCount(StepCount event) {
-    setState(() {
-      if (_initialSteps == -1) _initialSteps = event.steps;
-      _steps = (event.steps - _initialSteps) + _simulatedSteps;
-      if (_steps < 0) _steps = 0;
-      _recalcDynamicTarget();
-    });
-  }
+  void _syncBioMetrics() {
+    int reflex = _prefs.getInt(AppKeys.reflexScore) ?? 0;
+    double sleep = _prefs.getDouble(AppKeys.sleepHours) ?? 7.0;
+    List<String> soreMuscles = _prefs.getStringList(AppKeys.soreMuscles) ?? [];
 
-  void _onStepError(error) {
-    print("Pedometer Error: $error");
-  }
-
-  void _simulateWalk() {
-    setState(() {
-      _simulatedSteps += 500;
-      _steps += 500;
-      _recalcDynamicTarget();
-    });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("Debug: Added 500 steps. Total: $_steps"), duration: const Duration(milliseconds: 500)),
-    );
-  }
-
-  Future<void> _recalcDynamicTarget() async {
-    int activeSteps = _steps - 3000;
-    if (activeSteps < 0) activeSteps = 0;
-    int extraBurn = (activeSteps / 1000 * 40).round();
-    
-    int newTarget = _baseDailyTarget + extraBurn;
-    if (newTarget != _dynamicDailyTarget) {
-      setState(() {
-        _dynamicDailyTarget = newTarget;
-      });
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setInt('dynamic_calorie_target', _dynamicDailyTarget);
-    }
-  }
-
-  // --- BIO LOGIC & HISTORY SAVING ---
-  Future<void> _loadBioData() async {
-    final prefs = await SharedPreferences.getInstance();
-    
-    int reflex = prefs.getInt('last_reflex_score') ?? 0;
-    double sleep = prefs.getDouble('last_sleep_hours') ?? 7.0;
-    
-    // [NEW] Load Soreness Data
-    List<String> soreMuscles = prefs.getStringList('sore_muscles') ?? [];
-    String soreString = soreMuscles.isEmpty ? "None" : soreMuscles.join(", ");
-
-    _saveDailyStats(reflex, sleep);
+    _saveDailyStatsHistory(reflex, sleep);
 
     setState(() {
-      _userName = prefs.getString('user_name') ?? "User";
-      _userGoal = prefs.getString('user_goal') ?? "Maintain";
-      _baseDailyTarget = prefs.getInt('daily_calorie_target') ?? 2000;
-      _dynamicDailyTarget = prefs.getInt('dynamic_calorie_target') ?? _baseDailyTarget;
-      _recalcDynamicTarget();
-
       _reflexScore = reflex;
       _sleepHours = sleep;
-      _sorenessStatus = soreString; // Update UI variable
+      _sorenessStatus = soreMuscles.isEmpty ? "None" : soreMuscles.length > 2 ? "${soreMuscles.length} Areas" : soreMuscles.join(", ");
       
-      if (_reflexScore > 350 && _reflexScore > 0) {
+      bool reflexFatigue = _reflexScore > BioThresholds.reflexFatigue && _reflexScore > 0;
+      bool sleepFatigue = _sleepHours < BioThresholds.sleepFatigue;
+      
+      if (reflexFatigue) {
         _isGhostMode = true;
-        _statusReason = "Slow Reflexes";
-      } else if (_sleepHours < 5.5) {
+        _statusReason = "CNS Fatigue";
+      } else if (sleepFatigue) {
         _isGhostMode = true;
-        _statusReason = "Low Sleep";
+        _statusReason = "Sleep Debt";
       } else {
         _isGhostMode = false;
-        _statusReason = "Peak Condition";
+        _statusReason = "Peak State";
       }
     });
+  }
 
-    final String? logsString = prefs.getString('meal_logs');
+  void _syncNutrition() {
+    final String? logsString = _prefs.getString(AppKeys.mealLogs);
     if (logsString != null) {
       List<dynamic> logs = jsonDecode(logsString);
       int totalCals = 0;
-      double totalProtein = 0;
-      double totalCarbs = 0;
-      double totalFat = 0;
+      double p = 0, c = 0, f = 0;
       String today = DateTime.now().toString().split(' ')[0];
 
       for (var log in logs) {
         if (log['time'] != null && log['time'].toString().startsWith(today)) {
           totalCals += (log['calories'] as num).toInt();
           if (log['macros'] != null) {
-            totalProtein += _safeParse(log['macros']['protein']);
-            totalCarbs += _safeParse(log['macros']['carbs']);
-            totalFat += _safeParse(log['macros']['fat']);
+            p += _safeParse(log['macros']['protein']);
+            c += _safeParse(log['macros']['carbs']);
+            f += _safeParse(log['macros']['fat']);
           }
         }
       }
       setState(() {
         _caloriesConsumed = totalCals;
-        _proteinConsumed = totalProtein;
-        _carbsConsumed = totalCarbs;
-        _fatConsumed = totalFat;
+        _proteinConsumed = p;
+        _carbsConsumed = c;
+        _fatConsumed = f;
       });
     }
   }
 
-  Future<void> _saveDailyStats(int reflex, double sleep) async {
-    final prefs = await SharedPreferences.getInstance();
-    List<String> history = prefs.getStringList('daily_bio_history') ?? [];
+  void _initPedometer() async {
+    if (await Permission.activityRecognition.request().isGranted) {
+      _stepCountStream = Pedometer.stepCountStream;
+      _stepCountStream.listen(_onStepCount).onError((e) => print("Step Error: $e"));
+    }
+  }
+
+  void _onStepCount(StepCount event) {
+    if (!mounted) return;
+    setState(() {
+      if (_initialSteps == -1) _initialSteps = event.steps;
+      _steps = (event.steps - _initialSteps);
+      if (_steps < 0) _steps = 0;
+      _recalcDynamicTarget();
+    });
+  }
+
+  Future<void> _recalcDynamicTarget() async {
+    if (!_prefsLoaded) return;
+    int activeSteps = _steps - BioThresholds.stepBaseline;
+    if (activeSteps < 0) activeSteps = 0;
+    
+    int extraBurn = (activeSteps / 1000 * 40).round();
+    
+    int newTarget = _baseDailyTarget + extraBurn;
+    if (newTarget != _dynamicDailyTarget) {
+      setState(() => _dynamicDailyTarget = newTarget);
+      await _prefs.setInt(AppKeys.dynamicTarget, _dynamicDailyTarget);
+    }
+  }
+
+  Future<void> _saveDailyStatsHistory(int reflex, double sleep) async {
+    if (!_prefsLoaded) return;
+    List<String> history = _prefs.getStringList(AppKeys.bioHistory) ?? [];
     String today = DateTime.now().toString().split(' ')[0]; 
 
-    bool foundToday = false;
-    for (int i = 0; i < history.length; i++) {
-      var entry = jsonDecode(history[i]);
-      if (entry['date'] == today) {
-        entry['reflex'] = reflex;
-        entry['sleep'] = sleep;
-        history[i] = jsonEncode(entry);
-        foundToday = true;
-        break;
-      }
-    }
-
-    if (!foundToday) {
-      var newEntry = {'date': today, 'reflex': reflex, 'sleep': sleep};
-      history.add(jsonEncode(newEntry));
-    }
-
-    await prefs.setStringList('daily_bio_history', history);
+    history.removeWhere((e) => jsonDecode(e)['date'] == today);
+    
+    var newEntry = {'date': today, 'reflex': reflex, 'sleep': sleep};
+    history.add(jsonEncode(newEntry));
+    
+    await _prefs.setStringList(AppKeys.bioHistory, history);
   }
 
   double _safeParse(dynamic value) {
@@ -248,289 +250,229 @@ class _DashboardScreenState extends State<DashboardScreen> with WidgetsBindingOb
 
   @override
   Widget build(BuildContext context) {
+    if (!_prefsLoaded) return const Scaffold(backgroundColor: Colors.black, body: Center(child: CircularProgressIndicator()));
+
     Color primaryColor = _isGhostMode ? Colors.deepPurple.shade900 : Colors.teal.shade900;
     Color accentColor = _isGhostMode ? Colors.purpleAccent : Colors.tealAccent;
-    String statusMessage = _isGhostMode 
-        ? "⚠️ Recovery Mode ($_statusReason)" 
-        : "⚡ $_statusReason. Ready to Go.";
+    IconData statusIcon = _isGhostMode ? Icons.battery_alert : Icons.bolt;
 
-    double progress = _caloriesConsumed / _dynamicDailyTarget;
+    double progress = _dynamicDailyTarget == 0 ? 0 : _caloriesConsumed / _dynamicDailyTarget;
     if (progress > 1.0) progress = 1.0;
-    Color progressBarColor = accentColor;
-    if (progress >= 1.0) progressBarColor = Colors.redAccent;
 
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text("BioSync v2.2"),
+        title: const Text("BioSync OS"),
         backgroundColor: primaryColor,
-        centerTitle: true,
+        elevation: 0,
         actions: [
           IconButton(
             icon: const Icon(Icons.bar_chart),
-            tooltip: "Stats & Streak",
-            onPressed: () {
-              Navigator.push(context, MaterialPageRoute(builder: (context) => const StatsScreen()));
-            },
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const StatsScreen())),
           ),
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: () {
-              _loadBioData();
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Syncing Data...")));
-            },
+            onPressed: _syncAllData,
           )
         ],
       ),
       body: SingleChildScrollView(
-        child: Padding(
-          padding: const EdgeInsets.all(20.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // --- READINESS & STEPS ---
-              Row(
-                children: [
-                  Expanded(
-                    flex: 3,
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 500),
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: _isGhostMode ? Colors.purple.withOpacity(0.2) : Colors.green.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: _isGhostMode ? Colors.purple : Colors.green),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(_isGhostMode ? Icons.nights_stay : Icons.bolt, size: 18, color: _isGhostMode ? Colors.purpleAccent : Colors.greenAccent),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(statusMessage, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    flex: 2,
-                    child: GestureDetector(
-                      onTap: _simulateWalk,
-                      child: Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(color: Colors.grey.shade900, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.white24)),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            const Icon(Icons.directions_walk, size: 18, color: Colors.blueAccent),
-                            const SizedBox(width: 5),
-                            Text("$_steps", style: const TextStyle(color: Colors.blueAccent, fontWeight: FontWeight.bold)),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-
-              const SizedBox(height: 15),
-
-              // --- MISSION CONTROL ---
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 500),
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [primaryColor.withOpacity(0.8), Colors.black],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: primaryColor.withOpacity(0.5)),
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // HERO STATUS CARD
+            Container(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [primaryColor, Colors.black],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Column(
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: accentColor.withOpacity(0.3)),
+                boxShadow: [BoxShadow(color: primaryColor.withOpacity(0.4), blurRadius: 20, offset: const Offset(0, 10))]
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      // Fix: Wrapped in Expanded to prevent text overflow
+                      Expanded(
+                        child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text("Welcome, $_userName.", style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
-                            Text("Mission: $_userGoal", style: TextStyle(color: accentColor, fontSize: 14)),
+                            Text(_statusReason.toUpperCase(), style: TextStyle(color: accentColor, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
+                            const SizedBox(height: 5),
+                            Text("Hello, $_userName", style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis),
                           ],
                         ),
-                        const Icon(Icons.fingerprint, color: Colors.white24, size: 40),
-                      ],
-                    ),
-                    const SizedBox(height: 20),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text("Dynamic Budget", style: TextStyle(color: Colors.grey)),
-                        Text("$_caloriesConsumed / $_dynamicDailyTarget kcal", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(10),
-                      child: LinearProgressIndicator(
-                        value: progress,
-                        minHeight: 10,
-                        backgroundColor: Colors.grey.shade800,
-                        valueColor: AlwaysStoppedAnimation<Color>(progressBarColor),
                       ),
+                      const SizedBox(width: 10),
+                      Icon(statusIcon, color: accentColor, size: 42),
+                    ],
+                  ),
+                  const SizedBox(height: 25),
+                  // DIAGNOSTICS ROW
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(child: _buildMiniStat(Icons.bed, "${_sleepHours.toStringAsFixed(1)}h Sleep", Colors.blueGrey)),
+                      const SizedBox(width: 8), 
+                      Expanded(child: _buildMiniStat(Icons.directions_walk, "$_steps Steps", Colors.blue)),
+                      const SizedBox(width: 8), 
+                      Expanded(child: _buildMiniStat(Icons.accessibility, _sorenessStatus, _sorenessStatus == "None" ? Colors.green : Colors.redAccent)),
+                    ],
+                  )
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 25),
+
+            // ENERGY BUDGET
+            const Text("ENERGY BUDGET", style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(color: Colors.grey.shade900, borderRadius: BorderRadius.circular(20)),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text("$_caloriesConsumed / $_dynamicDailyTarget kcal", style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                      if (_dynamicDailyTarget > _baseDailyTarget)
+                         Text("+${_dynamicDailyTarget - _baseDailyTarget} Active Bonus", style: const TextStyle(color: Colors.greenAccent, fontSize: 12)),
+                    ],
+                  ),
+                  const SizedBox(height: 15),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: LinearProgressIndicator(
+                      value: progress,
+                      minHeight: 12,
+                      backgroundColor: Colors.black,
+                      valueColor: AlwaysStoppedAnimation<Color>(progress >= 1.0 ? Colors.redAccent : accentColor),
                     ),
-                    if (_dynamicDailyTarget > _baseDailyTarget)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8.0),
-                        child: Text("⚡ Activity Bonus: +${_dynamicDailyTarget - _baseDailyTarget} kcal earned", style: const TextStyle(color: Colors.blueAccent, fontSize: 12, fontStyle: FontStyle.italic)),
-                      ),
-                    const SizedBox(height: 20),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        _buildMacroStat("Protein", "${_proteinConsumed.round()}g", Colors.blue),
-                        _buildMacroStat("Carbs", "${_carbsConsumed.round()}g", Colors.orange),
-                        _buildMacroStat("Fat", "${_fatConsumed.round()}g", Colors.red),
-                      ],
-                    ),
-                  ],
+                  ),
+                  const SizedBox(height: 15),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      _buildMacro("PRO", _proteinConsumed, Colors.blue),
+                      _buildMacro("CARB", _carbsConsumed, Colors.orange),
+                      _buildMacro("FAT", _fatConsumed, Colors.red),
+                    ],
+                  )
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 30),
+
+            // ACTIONS GRID
+            const Text("COMMAND CENTER", style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 10),
+            GridView.count(
+              crossAxisCount: 2,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+              childAspectRatio: 1.4,
+              children: [
+                _ActionCard(
+                  title: "Bio-Sync", icon: Icons.fingerprint, color: Colors.deepOrange.shade900,
+                  onTap: () async { await Navigator.push(context, MaterialPageRoute(builder: (context) => const BioCheckinScreen())); _syncAllData(); },
                 ),
-              ),
-
-              const SizedBox(height: 25),
-
-              // --- ENGINE 1 ---
-              Text("Engine 1: The Body", style: TextStyle(color: accentColor, fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 15),
-              _MenuCard(
-                title: "Daily Bio-Sync",
-                subtitle: _reflexScore > 0 ? "Readiness Recorded" : "Measure Sleep & Reflexes",
-                icon: Icons.bolt,
-                color: _isGhostMode ? Colors.purple.shade800 : Colors.deepOrange.shade800,
-                onTap: () async {
-                  await Navigator.push(context, MaterialPageRoute(builder: (context) => const BioCheckinScreen()));
-                  _loadBioData();
-                },
-              ),
-              
-              // --- DIAGNOSTICS ROW (NOW WITH SORENESS) ---
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text("Sleep: ${_sleepHours}h", style: const TextStyle(color: Colors.grey, fontSize: 12)),
-                    // [NEW] Visual confirmation of Soreness Sync
-                    Flexible(child: Text("Soreness: $_sorenessStatus", style: const TextStyle(color: Colors.redAccent, fontSize: 12), overflow: TextOverflow.ellipsis)),
-                  ],
+                _ActionCard(
+                  title: "Log Meal", icon: Icons.add_a_photo, color: Colors.teal.shade800,
+                  onTap: () async { await Navigator.push(context, MaterialPageRoute(builder: (context) => const MealLogScreen())); _syncNutrition(); },
                 ),
-              ),
-
-              const SizedBox(height: 15),
-              _MenuCard(
-                title: "Smart Soreness",
-                subtitle: "Log pain points & adapt diet",
-                icon: Icons.accessibility_new,
-                color: Colors.red.shade900,
-                onTap: () async {
-                  await Navigator.push(context, MaterialPageRoute(builder: (context) => const BodyMapScreen()));
-                  _loadBioData();
-                }
-              ),
-
-              const SizedBox(height: 25),
-
-              // --- ENGINE 2 & 3 ---
-              Text("Engine 2 & 3: Logistics & Fuel", style: TextStyle(color: accentColor, fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 15),
-              
-              _MenuCard(
-                title: "Adaptive Flow",
-                subtitle: "Time-crunched? Custom Workout.",
-                icon: Icons.timer,
-                color: Colors.indigo.shade800,
-                onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const WorkoutScreen())),
-              ),
-              
-              const SizedBox(height: 15),
-              _MenuCard(
-                title: "Calorie Tracker",
-                subtitle: "Snap meals & track progress",
-                icon: Icons.local_fire_department,
-                color: Colors.teal.shade800,
-                onTap: () async {
-                  await Navigator.push(context, MaterialPageRoute(builder: (context) => const MealLogScreen()));
-                  _loadBioData();
-                },
-              ),
-              const SizedBox(height: 15),
-              _MenuCard(
-                title: "Context Chef",
-                subtitle: "Smart Meal Plan & Shopping",
-                icon: Icons.restaurant_menu,
-                color: Colors.purple.shade900,
-                onTap: () async {
-                  await Navigator.push(context, MaterialPageRoute(builder: (context) => const SmartMealPlannerScreen()));
-                  _loadBioData();
-                },
-              ),
-              const SizedBox(height: 15),
-              _MenuCard(
-                title: "Smart Groceries",
-                subtitle: "Auto-generated list",
-                icon: Icons.shopping_basket,
-                color: Colors.green.shade800,
-                onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const ShoppingListScreen())),
-              ),
-              const SizedBox(height: 15),
-              _MenuCard(
-                title: "Import Roster",
-                subtitle: "Scan WhatsApp Timetable",
-                icon: Icons.document_scanner,
-                color: Colors.blue.shade800,
-                onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const RosterScreen())),
-              ),
-              const SizedBox(height: 50),
-            ],
-          ),
+                _ActionCard(
+                  title: "Workout", icon: Icons.fitness_center, color: Colors.indigo.shade800,
+                  onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const WorkoutScreen())),
+                ),
+                _ActionCard(
+                  title: "Body Map", icon: Icons.accessibility_new, color: Colors.red.shade900,
+                  onTap: () async { await Navigator.push(context, MaterialPageRoute(builder: (context) => const BodyMapScreen())); _syncBioMetrics(); },
+                ),
+                _ActionCard(
+                  title: "Chef AI", icon: Icons.restaurant, color: Colors.purple.shade900,
+                  onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const SmartMealPlannerScreen())),
+                ),
+                _ActionCard(
+                  title: "Roster", icon: Icons.calendar_month, color: Colors.blue.shade900,
+                  onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const RosterScreen())),
+                ),
+              ],
+            ),
+            const SizedBox(height: 40),
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildMacroStat(String label, String value, Color color) {
-    return Column(children: [Text(value, style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.bold)), Text(label, style: const TextStyle(color: Colors.grey, fontSize: 12))]);
+  // --- SAFE LAYOUT BUILDER ---
+  Widget _buildMiniStat(IconData icon, String label, Color color) {
+    return Row(
+      children: [
+        Icon(icon, color: color, size: 16),
+        const SizedBox(width: 6),
+        // FIX: Expanded + maxLines prevents layout explosion
+        Expanded(
+          child: Text(
+            label, 
+            style: const TextStyle(color: Colors.white70, fontSize: 12), 
+            overflow: TextOverflow.ellipsis,
+            maxLines: 1, 
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMacro(String label, double val, Color color) {
+    return Column(
+      children: [
+        Text("${val.round()}g", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        Text(label, style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold)),
+      ],
+    );
   }
 }
 
-class _MenuCard extends StatelessWidget {
-  final String title, subtitle;
+class _ActionCard extends StatelessWidget {
+  final String title;
   final IconData icon;
   final Color color;
   final VoidCallback onTap;
 
-  const _MenuCard({required this.title, required this.subtitle, required this.icon, required this.color, required this.onTap});
+  const _ActionCard({required this.title, required this.icon, required this.color, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
     return InkWell(
       onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
       child: Container(
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(15)),
-        child: Row(children: [
-          Icon(icon, size: 40, color: Colors.white),
-          const SizedBox(width: 20),
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(title, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-            Text(subtitle, style: const TextStyle(color: Colors.white70)),
-          ])),
-          const Icon(Icons.arrow_forward_ios, color: Colors.white30, size: 16),
-        ]),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.8),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.white10)
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: Colors.white, size: 32),
+            const SizedBox(height: 8),
+            Text(title, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          ],
+        ),
       ),
     );
   }

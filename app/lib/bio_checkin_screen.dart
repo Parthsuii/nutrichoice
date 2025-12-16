@@ -3,6 +3,16 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+// --- 1. ENUM FOR TYPE SAFETY (Fixing "String State" Risk) ---
+enum GameState { idle, waiting, ready, finished }
+
+// --- 2. CONSTANTS (Fixing "Magic Strings") ---
+class BioKeys {
+  static const String sleepHours = 'last_sleep_hours';
+  static const String reflexScore = 'last_reflex_score';
+  static const String moodRating = 'last_mood_rating';
+}
+
 class BioCheckinScreen extends StatefulWidget {
   const BioCheckinScreen({super.key});
 
@@ -13,13 +23,15 @@ class BioCheckinScreen extends StatefulWidget {
 class _BioCheckinScreenState extends State<BioCheckinScreen> {
   // Inputs
   double _sleepHours = 7.0;
-  int _moodRating = 5; // 1-10
-  
+  int _moodRating = 5; // 2, 4, 6, 8, 10
+
   // Reflex Game State
-  String _gameState = "IDLE"; // IDLE, WAITING, READY, FINISHED
+  GameState _gameState = GameState.idle;
   int _reflexScore = 0;
   DateTime? _startTime;
   Timer? _timer;
+  
+  // UI State Helpers
   Color _gameColor = Colors.grey.shade800;
   String _gameMessage = "Tap to Start Reflex Test";
 
@@ -29,28 +41,42 @@ class _BioCheckinScreenState extends State<BioCheckinScreen> {
     _loadPreviousData();
   }
 
+  // --- 3. MEMORY LEAK FIX (Crucial) ---
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
   Future<void> _loadPreviousData() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _sleepHours = prefs.getDouble('last_sleep_hours') ?? 7.0;
-      _reflexScore = prefs.getInt('last_reflex_score') ?? 0;
+      _sleepHours = prefs.getDouble(BioKeys.sleepHours) ?? 7.0;
+      _reflexScore = prefs.getInt(BioKeys.reflexScore) ?? 0;
+      // Clamp sleep to slider range to avoid errors
+      if (_sleepHours < 3.0) _sleepHours = 3.0;
+      if (_sleepHours > 12.0) _sleepHours = 12.0;
     });
   }
 
-  // --- REFLEX GAME LOGIC ---
+  // --- REFLEX GAME LOGIC (Refactored for Clarity) ---
   void _startGame() {
+    _timer?.cancel(); // Safety cleanup
+    
     setState(() {
-      _gameState = "WAITING";
+      _gameState = GameState.waiting;
       _gameColor = Colors.red.shade900;
       _gameMessage = "Wait for GREEN...";
+      _reflexScore = 0; // Reset score on new game
     });
 
     // Random delay between 2-5 seconds
     int delay = Random().nextInt(3000) + 2000;
+    
     _timer = Timer(Duration(milliseconds: delay), () {
       if (!mounted) return;
       setState(() {
-        _gameState = "READY";
+        _gameState = GameState.ready;
         _gameColor = Colors.green.shade600;
         _gameMessage = "TAP NOW!";
         _startTime = DateTime.now();
@@ -59,56 +85,68 @@ class _BioCheckinScreenState extends State<BioCheckinScreen> {
   }
 
   void _handleGameTap() {
-    if (_gameState == "WAITING") {
-      // Too early!
-      _timer?.cancel();
-      setState(() {
-        _gameState = "IDLE";
-        _gameColor = Colors.orange.shade900;
-        _gameMessage = "Too early! Tap to retry.";
-      });
-    } else if (_gameState == "READY") {
-      // Valid tap
-      final endTime = DateTime.now();
-      final diff = endTime.difference(_startTime!).inMilliseconds;
-      setState(() {
-        _reflexScore = diff;
-        _gameState = "FINISHED";
-        _gameColor = Colors.blue.shade900;
-        _gameMessage = "${diff}ms\n(Tap to retry)";
-      });
-    } else {
-      // Restart
-      _startGame();
+    switch (_gameState) {
+      case GameState.idle:
+      case GameState.finished:
+        _startGame(); // Explicit Start/Restart
+        break;
+
+      case GameState.waiting:
+        // Too early!
+        _timer?.cancel();
+        setState(() {
+          _gameState = GameState.idle;
+          _gameColor = Colors.orange.shade900;
+          _gameMessage = "Too early! Tap to retry.";
+          _reflexScore = 0; // Invalid run
+        });
+        break;
+
+      case GameState.ready:
+        // Valid tap
+        final endTime = DateTime.now();
+        final diff = endTime.difference(_startTime!).inMilliseconds;
+        setState(() {
+          _reflexScore = diff;
+          _gameState = GameState.finished;
+          _gameColor = Colors.blue.shade900;
+          _gameMessage = "${diff}ms\n(Tap to retry)";
+        });
+        break;
     }
   }
 
-  // --- SAVE DATA ---
+  // --- SAVE DATA & LOGIC ---
   Future<void> _saveAndContinue() async {
     final prefs = await SharedPreferences.getInstance();
     
-    await prefs.setDouble('last_sleep_hours', _sleepHours);
-    await prefs.setInt('last_reflex_score', _reflexScore);
-    await prefs.setInt('last_mood_rating', _moodRating);
+    await prefs.setDouble(BioKeys.sleepHours, _sleepHours);
+    await prefs.setInt(BioKeys.reflexScore, _reflexScore);
+    await prefs.setInt(BioKeys.moodRating, _moodRating);
 
-    // Calculate detected context roughly for user feedback
+    // Domain Logic: Context Detection
     String detected = "Standard Day";
-    if (_sleepHours < 6.0 || (_reflexScore > 400 && _reflexScore > 0)) {
+    bool isTired = _sleepHours < 6.0 || (_reflexScore > 400 && _reflexScore > 0);
+    bool isPrime = _reflexScore < 250 && _reflexScore > 0;
+
+    if (isTired) {
       detected = "Rest / Recovery";
-    } else if (_reflexScore < 250 && _reflexScore > 0) {
+    } else if (isPrime) {
       detected = "Prime Performance";
     }
 
     if (!mounted) return;
+    
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text("Bio-Data Synced! Detected: $detected"),
-        backgroundColor: Colors.green,
+        backgroundColor: isPrime ? Colors.teal : (isTired ? Colors.orange : Colors.green),
+        behavior: SnackBarBehavior.floating,
       ),
     );
 
-    // Typically navigate to Meal Planner here
-    // Navigator.pushReplacement(context, MaterialPageRoute(...));
+    // Optional: Navigate to next screen
+    // Navigator.pop(context); 
   }
 
   @override
@@ -132,7 +170,7 @@ class _BioCheckinScreenState extends State<BioCheckinScreen> {
                 Text("${_sleepHours.toStringAsFixed(1)} hrs", style: const TextStyle(color: Colors.tealAccent, fontSize: 24, fontWeight: FontWeight.bold)),
                 Expanded(
                   child: Slider(
-                    value:_sleepHours.clamp(3.0,12.0),
+                    value: _sleepHours,
                     min: 3.0,
                     max: 12.0,
                     divisions: 18,
@@ -153,7 +191,8 @@ class _BioCheckinScreenState extends State<BioCheckinScreen> {
             
             GestureDetector(
               onTap: _handleGameTap,
-              child: Container(
+              child: AnimatedContainer( // Added Animation for polish
+                duration: const Duration(milliseconds: 300),
                 height: 200,
                 width: double.infinity,
                 decoration: BoxDecoration(
@@ -161,8 +200,8 @@ class _BioCheckinScreenState extends State<BioCheckinScreen> {
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(color: Colors.white24, width: 1),
                   boxShadow: [
-                    if (_gameState == "READY")
-                      BoxShadow(color: Colors.green.withOpacity(0.5), blurRadius: 20, spreadRadius: 5)
+                    if (_gameState == GameState.ready)
+                      BoxShadow(color: Colors.green.withOpacity(0.6), blurRadius: 25, spreadRadius: 2)
                   ]
                 ),
                 alignment: Alignment.center,
@@ -186,11 +225,13 @@ class _BioCheckinScreenState extends State<BioCheckinScreen> {
                 bool isSelected = _moodRating == rating;
                 return GestureDetector(
                   onTap: () => setState(() => _moodRating = rating),
-                  child: Container(
+                  child: AnimatedContainer( // Polish
+                    duration: const Duration(milliseconds: 200),
                     padding: const EdgeInsets.all(15),
                     decoration: BoxDecoration(
                       color: isSelected ? Colors.deepPurple : Colors.grey.shade900,
                       shape: BoxShape.circle,
+                      border: isSelected ? Border.all(color: Colors.white54, width: 2) : null,
                     ),
                     child: Text(
                       rating.toString(),
@@ -222,6 +263,7 @@ class _BioCheckinScreenState extends State<BioCheckinScreen> {
                   foregroundColor: Colors.black,
                   padding: const EdgeInsets.symmetric(vertical: 16),
                   textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
               ),
             ),

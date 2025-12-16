@@ -6,6 +6,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:device_calendar/device_calendar.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http_parser/http_parser.dart'; // Ensure this is imported for MediaType
 
 class RosterScreen extends StatefulWidget {
   final String? initialImagePath;
@@ -20,6 +21,7 @@ class _RosterScreenState extends State<RosterScreen> {
   
   Map<String, List<dynamic>> _weeklySchedule = {};
   bool _isScanning = false;
+  String _statusMessage = ""; // Feedback for AI process
   bool _hasUnsavedChanges = false;
   File? _image;
 
@@ -39,18 +41,11 @@ class _RosterScreenState extends State<RosterScreen> {
     }
   }
 
-  // --- HELPER: NORMALIZE WEEK (Fixes "Empty Screen" Bug) ---
+  // --- HELPER: NORMALIZE WEEK ---
   Map<String, List<dynamic>> _normalizeWeek(Map<String, List<dynamic>> input) {
     const days = [
-      "Monday",
-      "Tuesday",
-      "Wednesday",
-      "Thursday",
-      "Friday",
-      "Saturday",
-      "Sunday"
+      "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
     ];
-
     final normalized = <String, List<dynamic>>{};
     for (final d in days) {
       normalized[d] = input[d] ?? [];
@@ -122,24 +117,21 @@ class _RosterScreenState extends State<RosterScreen> {
         setState(() => _image = File(pickedFile.path));
         _uploadImageForAnalysis(_image!);
       }
-    } on PlatformException catch (e) {
-      if (e.code == 'already_active') {
-        print("Gallery already open");
-      } else {
-        _showError("Gallery Error: ${e.message}");
-      }
     } catch (e) {
       _showError("Error picking image: $e");
     }
   }
 
-  // --- UPDATED FUNCTION: CORRECT API URL & SAFE PARSING ---
+  // --- UPDATED: 5-MODEL FALLBACK STRATEGY ---
   Future<void> _uploadImageForAnalysis(File imageFile) async {
-    setState(() => _isScanning = true);
+    setState(() {
+      _isScanning = true;
+      // Tell user we are trying all 5 agents if necessary
+      _statusMessage = "Analyzing... (Gemini → Mistral → Moondream → Llama → Gemma)";
+    });
+
     try {
-      // ✅ UPDATED URL: Added '/api/' to match your backend route
       var uri = Uri.parse('https://nutrichoice-xvpf.onrender.com/api/analyze-roster/');
-      
       var request = http.MultipartRequest('POST', uri);
 
       request.headers.addAll({
@@ -147,13 +139,25 @@ class _RosterScreenState extends State<RosterScreen> {
         'Accept': 'application/json',
       });
 
-      request.files.add(await http.MultipartFile.fromPath('file', imageFile.path));
+      request.files.add(await http.MultipartFile.fromPath(
+        'file', 
+        imageFile.path,
+        contentType: MediaType('image', 'jpeg'),
+      ));
       
-      print("Sending clean request to $uri...");
-      var response = await http.Response.fromStream(await request.send());
+      print("Sending request to $uri...");
+
+      // EXTENDED TIMEOUT: 100 seconds to allow all 5 AI agents to attempt extraction
+      var streamedResponse = await request.send().timeout(
+        const Duration(seconds: 100),
+        onTimeout: () {
+          throw Exception("Analysis timed out. 5 AI Agents attempted but were busy.");
+        },
+      );
+
+      var response = await http.Response.fromStream(streamedResponse);
 
       print("Response: ${response.statusCode}");
-      print("Body: ${response.body}");
 
       if (response.statusCode == 200) {
         final dynamic rawData = jsonDecode(response.body);
@@ -177,29 +181,30 @@ class _RosterScreenState extends State<RosterScreen> {
         if (parsedSchedule.isNotEmpty) {
           setState(() {
             final normalizedData = _normalizeWeek(parsedSchedule);
-
             if (_weeklySchedule.isEmpty) {
                  _weeklySchedule = _normalizeWeek({});
             }
             _weeklySchedule.addAll(normalizedData);
-            
             _selectedMode = 0; 
             _hasUnsavedChanges = true;
+            _statusMessage = "";
           });
           
           await _saveSchedule();
-          _showSuccess("Schedule Updated!");
+          _showSuccess("Schedule Updated via AI!");
         } else {
           _showError("AI returned empty schedule.");
         }
       } else {
-        print("Server Error: ${response.body}");
         _showError("Server Blocked Request (${response.statusCode})");
       }
     } catch (e) {
       _showError("Connection Error: $e");
     } finally {
-      setState(() => _isScanning = false);
+      setState(() {
+        _isScanning = false;
+        _statusMessage = "";
+      });
     }
   }
 
@@ -258,12 +263,10 @@ class _RosterScreenState extends State<RosterScreen> {
 
       setState(() {
         if (_weeklySchedule.isEmpty) _weeklySchedule = _normalizeWeek({});
-        
         newEvents.forEach((key, events) {
             if (_weeklySchedule[key] == null) _weeklySchedule[key] = [];
             _weeklySchedule[key]!.addAll(events);
         });
-        
         _selectedMode = 0; 
         _hasUnsavedChanges = true;
       });
@@ -315,11 +318,8 @@ class _RosterScreenState extends State<RosterScreen> {
   @override
   Widget build(BuildContext context) {
     final daysOrder = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-    
     final keys = _weeklySchedule.keys.toList();
-    
-    final sortedKeys = keys
-      ..sort((a, b) => daysOrder.indexOf(a).compareTo(daysOrder.indexOf(b)));
+    final sortedKeys = keys..sort((a, b) => daysOrder.indexOf(a).compareTo(daysOrder.indexOf(b)));
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -520,10 +520,23 @@ class _RosterScreenState extends State<RosterScreen> {
               icon: _isScanning 
                   ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)) 
                   : const Icon(Icons.upload_file),
-              label: Text(_isScanning ? "AI is Analyzing..." : "Upload Timetable Image"),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, padding: const EdgeInsets.all(16)),
+              label: Text(_isScanning ? "AI Working..." : "Upload Timetable Image"),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue, 
+                foregroundColor: Colors.white, // White text/icon for better visibility
+                padding: const EdgeInsets.all(16),
+              ),
             ),
           ),
+          if (_isScanning)
+            Padding(
+              padding: const EdgeInsets.only(top: 12.0),
+              child: Text(
+                _statusMessage, 
+                style: const TextStyle(color: Colors.tealAccent, fontSize: 12),
+                textAlign: TextAlign.center,
+              ),
+            ),
         ],
       ),
     );

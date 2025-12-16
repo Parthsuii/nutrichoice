@@ -4,6 +4,31 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:table_calendar/table_calendar.dart';
 
+// --- 1. STRONG DATA MODEL (Fixes "dynamic" risk) ---
+class DailyBioEntry implements Comparable<DailyBioEntry> {
+  final DateTime date;
+  final double sleep;
+  final int reflex;
+
+  DailyBioEntry({required this.date, required this.sleep, required this.reflex});
+
+  // Factory to safely parse JSON
+  factory DailyBioEntry.fromJson(Map<String, dynamic> json) {
+    return DailyBioEntry(
+      date: DateTime.parse(json['date']),
+      // Handle potential type mismatches safely
+      sleep: (json['sleep'] as num).toDouble(),
+      reflex: (json['reflex'] as num).toInt(),
+    );
+  }
+
+  // Helper for calendar normalization
+  DateTime get normalizedDate => DateTime(date.year, date.month, date.day);
+
+  @override
+  int compareTo(DailyBioEntry other) => date.compareTo(other.date);
+}
+
 class StatsScreen extends StatefulWidget {
   const StatsScreen({super.key});
 
@@ -13,7 +38,7 @@ class StatsScreen extends StatefulWidget {
 
 class _StatsScreenState extends State<StatsScreen> {
   // Data Containers
-  Map<DateTime, List<dynamic>> _events = {};
+  Map<DateTime, List<DailyBioEntry>> _events = {}; // Typed List
   List<FlSpot> _sleepSpots = [];
   List<FlSpot> _reflexSpots = [];
   int _currentStreak = 0;
@@ -33,70 +58,77 @@ class _StatsScreenState extends State<StatsScreen> {
     final prefs = await SharedPreferences.getInstance();
     List<String> historyRaw = prefs.getStringList('daily_bio_history') ?? [];
     
-    // Temp variables to hold processed data
-    Map<DateTime, List<dynamic>> events = {};
+    // 1. Parse & Sort Data (Crucial Fix)
+    List<DailyBioEntry> allEntries = historyRaw.map((raw) {
+      return DailyBioEntry.fromJson(jsonDecode(raw));
+    }).toList();
+
+    // Sort oldest to newest ensures Graphs and Streaks work correctly
+    allEntries.sort(); 
+
+    // Temp variables
+    Map<DateTime, List<DailyBioEntry>> events = {};
     List<FlSpot> sleepData = [];
     List<FlSpot> reflexData = [];
-    List<DateTime> dates = [];
-
-    // Parse History List
-    for (int i = 0; i < historyRaw.length; i++) {
-      var entry = jsonDecode(historyRaw[i]);
-      DateTime date = DateTime.parse(entry['date']);
+    
+    // 2. Populate Data Structures
+    for (int i = 0; i < allEntries.length; i++) {
+      var entry = allEntries[i];
       
-      // 1. Setup Calendar Event (normalize to midnight to match calendar logic)
-      DateTime cleanDate = DateTime(date.year, date.month, date.day);
-      if (events[cleanDate] == null) events[cleanDate] = [];
-      events[cleanDate]!.add(entry);
-      dates.add(cleanDate);
+      // Calendar Mapping
+      if (events[entry.normalizedDate] == null) events[entry.normalizedDate] = [];
+      events[entry.normalizedDate]!.add(entry);
 
-      // 2. Setup Graphs (Using Index as X-Axis for simple trend view)
-      // Only graph last 7 entries to keep it readable
-      if (i >= historyRaw.length - 7) {
-        double xIndex = i.toDouble();
-        sleepData.add(FlSpot(xIndex, (entry['sleep'] as num).toDouble()));
-        reflexData.add(FlSpot(xIndex, (entry['reflex'] as num).toDouble()));
-      }
-    }
-
-    // 3. Calculate Streak (Consecutive days backwards from today)
-    int streak = 0;
-    if (dates.isNotEmpty) {
-      // Sort dates newest to oldest
-      dates.sort((a, b) => b.compareTo(a)); 
-      
-      DateTime today = DateTime.now();
-      DateTime checkDate = DateTime(today.year, today.month, today.day);
-      
-      // Check if we logged today
-      bool streakAlive = dates.any((d) => isSameDay(d, checkDate));
-      
-      // If not logged today, check yesterday (streak acts as "frozen" for 24h)
-      if (!streakAlive) {
-        checkDate = checkDate.subtract(const Duration(days: 1));
-        streakAlive = dates.any((d) => isSameDay(d, checkDate));
-      }
-
-      if (streakAlive) {
-        streak++; // Count the first day found
-        // Check previous days
-        while (true) {
-          checkDate = checkDate.subtract(const Duration(days: 1));
-          if (dates.any((d) => isSameDay(d, checkDate))) {
-            streak++;
-          } else {
-            break; // Streak broken
-          }
+      // Graphing (Last 7 days only)
+      if (i >= allEntries.length - 7) {
+        // We use a simple index 0..6 for the visual trend
+        // (Since we sorted above, this line will be correct)
+        double relativeX = (i - (allEntries.length - 7)).toDouble(); 
+        if (relativeX >= 0) {
+           sleepData.add(FlSpot(relativeX, entry.sleep));
+           reflexData.add(FlSpot(relativeX, entry.reflex.toDouble()));
         }
       }
     }
 
+    // 3. Robust Streak Calculation
+    int streak = _calculateStreak(allEntries);
+
+    if (!mounted) return;
     setState(() {
       _events = events;
       _sleepSpots = sleepData;
       _reflexSpots = reflexData;
       _currentStreak = streak;
     });
+  }
+
+  int _calculateStreak(List<DailyBioEntry> sortedEntries) {
+    if (sortedEntries.isEmpty) return 0;
+
+    // Get unique dates sorted Newest -> Oldest
+    Set<DateTime> uniqueDates = sortedEntries.map((e) => e.normalizedDate).toSet();
+    List<DateTime> sortedDates = uniqueDates.toList()..sort((a, b) => b.compareTo(a));
+
+    DateTime today = DateTime.now();
+    DateTime checkDate = DateTime(today.year, today.month, today.day);
+
+    // Check if streak is active (logged Today OR Yesterday)
+    bool streakActive = sortedDates.contains(checkDate);
+    if (!streakActive) {
+       checkDate = checkDate.subtract(const Duration(days: 1)); // Check yesterday
+       streakActive = sortedDates.contains(checkDate);
+    }
+
+    if (!streakActive) return 0; // Streak broken
+
+    int count = 0;
+    // Walk backwards day by day
+    while (sortedDates.contains(checkDate)) {
+      count++;
+      checkDate = checkDate.subtract(const Duration(days: 1));
+    }
+    return count;
   }
 
   @override
@@ -176,6 +208,7 @@ class _StatsScreenState extends State<StatsScreen> {
                         _selectedDay = selectedDay;
                         _focusedDay = focusedDay;
                       });
+                      // Optional: Show details for selected day here
                     },
                     onFormatChanged: (format) => setState(() => _calendarFormat = format),
                     eventLoader: (day) {
@@ -219,7 +252,7 @@ class _StatsScreenState extends State<StatsScreen> {
   Widget _buildGraphContainer(List<FlSpot> spots, Color color, String emptyMsg) {
     return Container(
       height: 220,
-      padding: const EdgeInsets.fromLTRB(10, 25, 20, 10), // Padding for labels
+      padding: const EdgeInsets.fromLTRB(10, 25, 20, 10), 
       decoration: BoxDecoration(
         color: Colors.grey.shade900,
         borderRadius: BorderRadius.circular(15),

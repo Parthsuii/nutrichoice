@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:shared_preferences/shared_preferences.dart'; // REQUIRED: For saving data
+import 'package:shared_preferences/shared_preferences.dart';
 
 class SleepTracker extends StatefulWidget {
   const SleepTracker({super.key});
@@ -10,51 +10,59 @@ class SleepTracker extends StatefulWidget {
 }
 
 class _SleepTrackerState extends State<SleepTracker> {
+  // --- 1. CONSTANTS (Fixing "Magic Numbers" & Fragile Strings) ---
+  static const String _kPrefHonesty = 'honesty_buffer';
+  static const String _kPrefLastSleep = 'last_sleep_hours';
+  static const double _kPenaltyHours = 1.5;
+
   TimeOfDay _bedTime = const TimeOfDay(hour: 23, minute: 0);
   TimeOfDay _wakeTime = const TimeOfDay(hour: 7, minute: 0);
-  bool _watchedTV = false; // The Honesty Buffer
+  bool _watchedTV = false;
   String _result = "";
 
   @override
   void initState() {
     super.initState();
-    _loadSavedData(); // Load previous settings when screen opens
+    _loadSavedData();
   }
 
-  // Load last saved buffer preference
   Future<void> _loadSavedData() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _watchedTV = prefs.getBool('honesty_buffer') ?? false;
+      // Using constant key
+      _watchedTV = prefs.getBool(_kPrefHonesty) ?? false;
     });
   }
 
   Future<void> _calculateAndSave() async {
-    // 1. Calculate Raw Sleep Duration
+    // 1. Calculate Raw Sleep
     double start = _bedTime.hour + _bedTime.minute / 60.0;
     double end = _wakeTime.hour + _wakeTime.minute / 60.0;
 
-    // Handle overnight calculation (e.g. 11 PM to 7 AM)
+    // Handle overnight logic 
     if (end < start) end += 24;
 
     double rawSleep = end - start;
     double recoveryCredit = rawSleep;
 
-    // 2. Apply Honesty Buffer (Engine 1 Logic)
+    // 2. Apply Penalty (Using Constant)
     if (_watchedTV) {
-      recoveryCredit -= 1.5; // Penalty: -90 mins for blue light
+      recoveryCredit -= _kPenaltyHours;
     }
 
-    // 3. Save Data for Reflex Game (Engine 1 Integration)
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble('last_sleep_hours', recoveryCredit);
-    await prefs.setBool('honesty_buffer', _watchedTV);
+    // 3. SAFETY FIX: Clamp to prevent negative numbers
+    recoveryCredit = recoveryCredit.clamp(0.0, 24.0);
 
-    // 4. Show Result
+    // 4. Save Data (Using Constants)
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_kPrefLastSleep, recoveryCredit);
+    await prefs.setBool(_kPrefHonesty, _watchedTV);
+
+    // 5. Show Result
     setState(() {
       _result =
           "Raw Sleep: ${rawSleep.toStringAsFixed(1)} hrs\n"
-          "Honesty Penalty: ${_watchedTV ? '-1.5 hrs' : 'None'}\n"
+          "Honesty Penalty: ${_watchedTV ? '-$_kPenaltyHours hrs' : 'None'}\n"
           "BioSync Credit: ${recoveryCredit.toStringAsFixed(1)} hrs";
     });
 
@@ -87,6 +95,13 @@ class _SleepTrackerState extends State<SleepTracker> {
 
   @override
   Widget build(BuildContext context) {
+    // Performance: Cache the font style if used repeatedly
+    final titleStyle = GoogleFonts.roboto(
+      color: Colors.white,
+      fontSize: 18,
+      fontWeight: FontWeight.bold,
+    );
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
@@ -110,7 +125,6 @@ class _SleepTrackerState extends State<SleepTracker> {
             _buildTimeCard("Wake Time", _wakeTime, false),
             const SizedBox(height: 20),
 
-            // The Honesty Buffer Toggle
             Container(
               decoration: BoxDecoration(
                 color: Colors.red.shade900.withOpacity(0.2),
@@ -118,14 +132,7 @@ class _SleepTrackerState extends State<SleepTracker> {
                 border: Border.all(color: Colors.red.shade900),
               ),
               child: SwitchListTile(
-                title: Text(
-                  "Honesty Buffer",
-                  style: GoogleFonts.roboto(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+                title: Text("Honesty Buffer", style: titleStyle),
                 subtitle: const Text(
                   "Did you use phone/TV in bed?",
                   style: TextStyle(color: Colors.white70),
@@ -138,7 +145,6 @@ class _SleepTrackerState extends State<SleepTracker> {
 
             const Spacer(),
 
-            // Result Box
             if (_result.isNotEmpty)
               Container(
                 padding: const EdgeInsets.all(15),

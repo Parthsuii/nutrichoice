@@ -126,7 +126,7 @@ class _ShoppingListScreenState extends State<ShoppingListScreen> {
 
     try {
       final response = await http.post(
-        Uri.parse('https://nutrichoice-xvpf.onrender.com/compare-prices'),
+        Uri.parse('https://nutrichoice-xvpf.onrender.com/api/compare-prices'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({"item_name": item}),
       );

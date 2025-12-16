@@ -127,7 +127,6 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
     String? savedJson = prefs.getString('current_workout_plan');
 
     if (savedKey == currentKey && savedJson != null) {
-      // Keys match -> Load from Cache
       try {
         final data = jsonDecode(savedJson);
         setState(() {
@@ -146,14 +145,11 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
         print("Workout Data Corrupt: $e");
       }
     } else {
-      // Keys mismatch -> Clear Cache & FETCH NEW
       print("Context changed (Old: $savedKey, New: $currentKey). Auto-generating...");
-      
       setState(() {
         _workoutPlan = [];
         _completedIndices.clear();
       });
-
       _generateWorkout(); 
     }
   }
@@ -215,7 +211,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
     );
   }
 
-  // --- 3. AI GENERATION (Fixed: Null Safety) ---
+  // --- 3. AI GENERATION (Updated with Correct URL) ---
   Future<void> _generateWorkout() async {
     if (_isLoading) return; 
 
@@ -242,18 +238,20 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
     }
 
     try {
+      // 👇 UPDATED URL TO USE /api/ PREFIX
       final response = await http.post(
-        Uri.parse('https://nutrichoice-xvpf.onrender.com/generate-workout/'), 
+        Uri.parse('https://nutrichoice-xvpf.onrender.com/api/generate-workout/'), 
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({"context": promptContext}),
       );
+
+      print("Response Code: ${response.statusCode}"); // Debug Print
 
       if (!mounted) return;
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         
-        // --- FIX: Check if 'exercises' exists and is actually a list ---
         if (data['exercises'] != null && data['exercises'] is List) {
           setState(() {
             _workoutPlan = _sanitizeWorkout(data['exercises']);

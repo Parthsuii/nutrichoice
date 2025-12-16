@@ -13,6 +13,7 @@ import os
 import base64
 import json
 import re 
+import requests # NEW: For OpenRouter Calls
 
 # --- HYBRID LIBRARIES ---
 from openai import OpenAI 
@@ -23,7 +24,7 @@ from .models import FoodItem, UserProfile, FoodKnowledge
 from .serializers import FoodItemSerializer, UserProfileSerializer
 
 # --- CONFIGURATION ---
-OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")
+OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY") # Ensure this is set in Render
 GOOGLE_KEY = os.environ.get("GOOGLE_API_KEY") 
 MISTRAL_KEY = os.environ.get("MISTRAL_API_KEY") 
 
@@ -53,6 +54,45 @@ def safe_json_extract(text):
         return json.loads(fixed_text)
     except: return None
 
+# --- HELPER: OPENROUTER VISION CALL ---
+def call_openrouter_vision(model_name, prompt, b64_image):
+    """Generic handler for Llama 3.2 Vision and Gemma 3 via OpenRouter."""
+    if not OPENROUTER_KEY: return None
+    
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": SITE_URL, 
+        "X-Title": APP_NAME,
+    }
+    data = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
+                    }
+                ]
+            }
+        ]
+    }
+    
+    try:
+        # 45s timeout per model to keep total wait reasonable
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=45)
+        if response.status_code == 200:
+            content = response.json()['choices'][0]['message']['content']
+            return safe_json_extract(content)
+        else:
+            logger.error(f"❌ OpenRouter ({model_name}) Failed: {response.text}")
+    except Exception as e:
+        logger.error(f"❌ OpenRouter Error: {e}")
+    return None
+
 # --- SAFETY NET FUNCTION ---
 def enrich_meal_data(meal):
     """Ensures every meal has a recipe and valid nutrients."""
@@ -71,7 +111,6 @@ def enrich_meal_data(meal):
 
     nutrients = meal.get('nutrients', {})
     
-    # Safe parse helper
     def get_val(v):
         if isinstance(v, (int, float)): return int(v)
         if isinstance(v, str) and v.isdigit(): return int(v)
@@ -94,14 +133,11 @@ def enrich_meal_data(meal):
             f = int(f * scale)
 
     meal['nutrients'] = { "protein": p, "fat": f, "carbs": c }
-    
     meal['protein'] = p
     meal['fat'] = f
     meal['carbs'] = c
-
     return meal
 
-# --- HELPER: GET USER (Hybrid Safety) ---
 def get_user_safe(request):
     if request.user.is_authenticated:
         return request.user
@@ -318,12 +354,10 @@ def swap_meal(request):
 @csrf_exempt
 @api_view(['POST'])
 def generate_workout(request):
-    # --- TRACER LOG: Proves the update is live ---
     logger.info("--- 🚀 REAL AI DEPLOYMENT LIVE: Generating Workout... ---")
     
     context_data = request.data.get('context', 'General Fitness')
     
-    # 2. Prompt for AI
     prompt = f"""
     Act as an elite Coach.
     CLIENT CONTEXT: {context_data}
@@ -340,7 +374,6 @@ def generate_workout(request):
 
     plan_text = None
     
-    # 3. Try AI Providers
     if GOOGLE_KEY:
         try:
             genai.configure(api_key=GOOGLE_KEY)
@@ -361,17 +394,14 @@ def generate_workout(request):
         except Exception as e:
             logger.error(f"❌ Mistral Workout Failed: {e}")
 
-    # 4. Parse & Return
     if plan_text:
         data = safe_json_extract(plan_text)
         if data and "exercises" in data:
-            # Type Safety
             for ex in data.get("exercises", []):
                 try: ex["sets"] = int(ex.get("sets", 3))
                 except: ex["sets"] = 3
             return Response(data)
 
-    # 5. Fallback
     logger.warning("⚠️ All AI Providers failed. Returning fallback workout.")
     return Response({
         "advice": "AI busy. Here is a balanced session.",
@@ -383,7 +413,7 @@ def generate_workout(request):
     })
 
 # ==========================================
-# 4. ROSTER ANALYZER
+# 4. ROSTER ANALYZER (UPDATED QUAD-MODEL FALLBACK)
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):
@@ -395,28 +425,42 @@ class AnalyzeRosterView(APIView):
         if 'file' not in request.FILES: return Response({"error": "No file"}, 400)
         img = request.FILES['file']
         b64 = encode_image(img)
-        prompt = "Analyze timetable. JSON: { \"weekly_schedule\": { \"Monday\": [{\"time\": \"10:00\", \"event\": \"Math\"}] } }"
+        prompt = "Analyze this timetable/roster image. Extract classes/events. Output strictly this JSON structure: { \"weekly_schedule\": { \"Monday\": [{\"time\": \"10:00\", \"event\": \"Math\"}] } }"
         
+        # --- STRATEGY 1: GOOGLE GEMINI 2.0 (Fastest) ---
         if GOOGLE_KEY:
             try:
-                logger.info("📅 Roster Analysis: Trying Google...")
+                logger.info("📅 Roster: Trying Google Gemini 2.0...")
                 genai.configure(api_key=GOOGLE_KEY)
                 m = genai.GenerativeModel('gemini-2.0-flash-exp')
                 res = m.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt], generation_config={"response_mime_type": "application/json"})
                 if res.text: return Response(safe_json_extract(res.text))
             except Exception as e:
-                logger.error(f"❌ Google Roster Failed: {e}")
+                logger.warning(f"⚠️ Google Failed: {e}")
 
+        # --- STRATEGY 2: MISTRAL PIXTRAL (Reliable Backup) ---
         if MISTRAL_KEY:
             try:
-                logger.info("📅 Roster Analysis: Trying Mistral...")
+                logger.info("📅 Roster: Trying Mistral Pixtral...")
                 client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=MISTRAL_KEY)
                 res = client.chat.completions.create(model="pixtral-12b-2409", messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}])
                 return Response(safe_json_extract(res.choices[0].message.content))
             except Exception as e:
-                logger.error(f"❌ Mistral Roster Failed: {e}")
+                logger.warning(f"⚠️ Mistral Failed: {e}")
 
-        return Response({"error": "Busy"}, 503)
+        # --- STRATEGY 3: LLAMA 3.2 VISION (Reasoning Power) ---
+        logger.info("📅 Roster: Trying Llama 3.2 Vision...")
+        # Llama 3.2 90B Vision Instruct is SOTA for OCR tasks
+        res_llama = call_openrouter_vision("meta-llama/llama-3.2-90b-vision-instruct", prompt, b64)
+        if res_llama: return Response(res_llama)
+
+        # --- STRATEGY 4: GEMMA 3 (Latest Google Model) ---
+        logger.info("📅 Roster: Trying Gemma 3...")
+        # Gemma 3 27B Instruct offers multimodal capabilities
+        res_gemma = call_openrouter_vision("google/gemma-3-27b-it", prompt, b64)
+        if res_gemma: return Response(res_gemma)
+
+        return Response({"error": "All AI agents busy. Please try later."}, 503)
 
 # ... Standard Views ...
 @csrf_exempt 
