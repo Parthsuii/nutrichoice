@@ -246,7 +246,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
 
     try {
       final response = await http.post(
-        Uri.parse('https://nutrichoice-xvpf.onrender.com/generate-workout'),
+        Uri.parse('https://nutrichoice-xvpf.onrender.com/generate-workout/'),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({"context": promptContext}),
       );

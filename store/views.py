@@ -136,7 +136,7 @@ class ScanFoodView(APIView):
                         data = safe_json_extract(res.text)
                         source_used = "Google Vision"
                 except Exception as e:
-                    logger.error(f"❌ Google Vision Failed: {e}") # <--- LOG ERROR
+                    logger.error(f"❌ Google Vision Failed: {e}")
 
             if not data and MISTRAL_KEY:
                 try: 
