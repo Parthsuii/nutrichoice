@@ -24,7 +24,7 @@ from .serializers import FoodItemSerializer, UserProfileSerializer
 # --- CONFIGURATION ---
 OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY")
 GOOGLE_KEY = os.environ.get("GOOGLE_API_KEY") 
-MISTRAL_KEY = os.environ.get("MISTRAL_API_KEY") # <--- NEW NATIVE KEY
+MISTRAL_KEY = os.environ.get("MISTRAL_API_KEY") 
 
 SITE_URL = "https://nutrichoice.onrender.com"
 APP_NAME = "NutriChoice"
@@ -89,10 +89,9 @@ class ScanFoodView(APIView):
             if not data and MISTRAL_KEY:
                 try:
                     print("   👉 Trying Mistral Direct (Pixtral)...")
-                    # Using OpenAI client but pointing to Mistral API
                     client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=MISTRAL_KEY)
                     res = client.chat.completions.create(
-                        model="pixtral-12b-2409", # Native Pixtral Model
+                        model="pixtral-12b-2409",
                         messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
                     )
                     data = safe_json_extract(res.choices[0].message.content)
@@ -113,7 +112,6 @@ class ScanFoodView(APIView):
                 except: pass
 
         elif text_query:
-            # TEXT SCAN LOGIC (Similar flow: Google -> Mistral -> OpenRouter)
             food_name_normalized = normalize_food_name(str(text_query))
             print(f"🔍 TEXT SCAN: Checking '{food_name_normalized}'...")
             
@@ -197,7 +195,7 @@ class ScanFoodView(APIView):
         return Response({"error": "AI Busy. Manual entry required."}, 422)
 
 # =========================================================================
-# 2. SMART MEAL PLANNER (Google -> Mistral Direct -> OpenRouter)
+# 2. SMART MEAL PLANNER (Multi-Meal Schedule Logic)
 # =========================================================================
 @csrf_exempt
 @api_view(['POST'])
@@ -223,32 +221,37 @@ def generate_meal_plan(request):
 
     pantry_text = ", ".join(ingredients) if ingredients else "Simple ingredients"
     
+    # 2. DETERMINE SCHEDULE (Critical Step)
+    # This instructs the AI to generate multiple meals based on time
+    meal_instruction = "Generate a full schedule (at least 3 meals: Breakfast, Lunch, Dinner)."
+    if current_hour > 20:
+        meal_instruction = "Late Night: Generate 1 light snack or recovery drink."
+    elif current_hour > 14:
+        meal_instruction = "Afternoon: Generate 2 distinct items: an Afternoon Snack and a Dinner."
+    elif remaining_cals < 500:
+        meal_instruction = "Low Calorie Gap: Generate 2 small snacks/sides to hit the target."
+
     prompt = f"""
     You are a strictly compliant JSON API.
     
-    TASK: Generate a meal plan based on:
-    - REMAINING CALORIES: {remaining_cals} (Must aim for this)
+    TASK: Generate a meal plan schedule.
+    - REMAINING CALORIES: {remaining_cals} (Distribute these across the meals)
     - CURRENT TIME: {current_hour}:00
     - CONTEXT: {context}
     - PANTRY: {pantry_text}
 
     RULES:
-    1. If remaining < 200, suggest a light snack.
-    2. If remaining > 500, suggest a full meal.
+    1. {meal_instruction} <--- FOLLOW THIS SCHEDULE
+    2. Do NOT output just one big meal unless it's Late Night.
     3. Return valid JSON only.
 
-    OUTPUT FORMAT:
+    OUTPUT FORMAT (Example):
     {{
       "analysis": "1 short sentence analysis.",
       "meals": [
-        {{ 
-           "name": "Dish Name", 
-           "calories": {remaining_cals}, 
-           "protein": 20, "carbs": 30, "fat": 10, 
-           "time": "Meal",
-           "ingredients": ["Item1"],
-           "recipe": ["Step 1"]
-        }}
+        {{ "name": "Breakfast Item", "calories": 400, "time": "Breakfast", "ingredients": ["Oats"], "recipe": ["Boil water"] }},
+        {{ "name": "Lunch Item", "calories": 600, "time": "Lunch", "ingredients": ["Rice"], "recipe": ["Cook rice"] }},
+        {{ "name": "Dinner Item", "calories": 500, "time": "Dinner", "ingredients": ["Chicken"], "recipe": ["Grill"] }}
       ]
     }}
     """
@@ -259,7 +262,7 @@ def generate_meal_plan(request):
     # --- 1. GOOGLE DIRECT ---
     if GOOGLE_KEY:
         try:
-            print("   👉 1. Trying Google Direct...")
+            print("   👉 1. Trying Google Gemini 2.0...")
             genai.configure(api_key=GOOGLE_KEY)
             m = genai.GenerativeModel('gemini-2.0-flash-exp')
             plan_text = m.generate_content(
@@ -275,9 +278,9 @@ def generate_meal_plan(request):
             print("   👉 2. Trying Mistral Direct...")
             client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=MISTRAL_KEY)
             res = client.chat.completions.create(
-                model="mistral-small-latest", # Or mistral-large-latest
+                model="mistral-small-latest", 
                 messages=[
-                    {"role": "system", "content": "You are a JSON generator. Output valid JSON only."}, 
+                    {"role": "system", "content": "You are a JSON generator. Output valid JSON only. Generate a LIST of meals."}, 
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"}
@@ -302,18 +305,23 @@ def generate_meal_plan(request):
     if plan_text:
         print(f"   ✅ AI Success via {ai_source}")
         data = safe_json_extract(plan_text)
-        if data and "meals" in data:
+        # Check if we actually got a list of meals
+        if data and "meals" in data and isinstance(data["meals"], list):
             return Response(data)
 
     print("   ⚠️ Sending Hard Fallback Meal")
     return Response({
-        "analysis": "AI busy. Here is a default suggestion.",
+        "analysis": "AI busy. Here is a balanced default schedule.",
         "meals": [
             { 
-                "name": "Protein Oats", 
-                "calories": 300, "protein": 15, "carbs": 35, "fat": 6, "time": "Anytime",
-                "ingredients": ["Oats", "Milk"],
-                "recipe": ["Boil oats", "Serve warm"]
+                "name": "Oats with Milk", 
+                "calories": 300, "protein": 10, "carbs": 40, "fat": 6, "time": "Breakfast",
+                "ingredients": ["Oats", "Milk"], "recipe": ["Boil oats"]
+            },
+            { 
+                "name": "Chickpea Salad", 
+                "calories": 400, "protein": 15, "carbs": 50, "fat": 10, "time": "Lunch",
+                "ingredients": ["Chickpeas", "Veggies"], "recipe": ["Mix all"]
             }
         ]
     })
@@ -321,12 +329,11 @@ def generate_meal_plan(request):
 @csrf_exempt
 @api_view(['POST'])
 def swap_meal(request):
-    # Same logic: Google -> Mistral -> OpenRouter
     old_meal = request.data.get('goal', 'Meal') 
     calories = request.data.get('calories', 500)
     context = request.data.get('context', 'Standard')
     
-    prompt = f"Suggest replacement for '{old_meal}' (~{calories} kcal). Context: {context}. Return JSON: {{ \"name\": \"...\", \"calories\": {calories}, \"protein\": 0, \"carbs\": 0, \"fat\": 0, \"ingredients\": [], \"recipe\": [] }}"
+    prompt = f"Suggest ONE vegetarian Indian replacement for '{old_meal}' (~{calories} kcal). Context: {context}. Return JSON: {{ \"name\": \"...\", \"calories\": {calories}, \"protein\": 0, \"carbs\": 0, \"fat\": 0, \"ingredients\": [], \"recipe\": [] }}"
     
     plan_text = None
     if GOOGLE_KEY:
