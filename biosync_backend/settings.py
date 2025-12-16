@@ -13,8 +13,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-change-me-to-a-real-secret-key')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-# This sets Debug to False if running on Render, True if on your laptop
-DEBUG = True
+# This automatically sets Debug to False on Render, True on your laptop
+DEBUG = 'RENDER' not in os.environ
 
 # ALLOWED_HOSTS is required for the cloud. '*' allows your Render URL to work.
 ALLOWED_HOSTS = ['*']
@@ -146,3 +146,21 @@ CSRF_TRUSTED_ORIGINS = [
 # 3. COOKIES: Ensure cookies work over HTTPS
 CSRF_COOKIE_SECURE = True
 SESSION_COOKIE_SECURE = True
+
+# ========================================================
+#  LOGGING CONFIGURATION (NEW)
+# ========================================================
+# This allows 'logger.info' and 'logger.error' to appear in Render logs
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',  # Shows INFO, WARNING, and ERROR logs
+    },
+}
