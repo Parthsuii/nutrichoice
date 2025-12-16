@@ -55,7 +55,9 @@ def safe_json_extract(text):
 
 # --- SAFETY NET FUNCTION ---
 def enrich_meal_data(meal):
+    """Ensures every meal has a recipe and valid nutrients."""
     if 'name' not in meal: meal['name'] = "Healthy Choice"
+    
     cals = meal.get('calories', 400)
     if isinstance(cals, str): 
         cals = int("".join(filter(str.isdigit, cals)) or 400)
@@ -68,6 +70,8 @@ def enrich_meal_data(meal):
         else: meal['recipe'] = ["Prep ingredients.", "Cook main protein.", "Combine sides.", "Serve warm."]
 
     nutrients = meal.get('nutrients', {})
+    
+    # Safe parse helper
     def get_val(v):
         if isinstance(v, (int, float)): return int(v)
         if isinstance(v, str) and v.isdigit(): return int(v)
@@ -90,11 +94,14 @@ def enrich_meal_data(meal):
             f = int(f * scale)
 
     meal['nutrients'] = { "protein": p, "fat": f, "carbs": c }
+    
     meal['protein'] = p
     meal['fat'] = f
     meal['carbs'] = c
+
     return meal
 
+# --- HELPER: GET USER (Hybrid Safety) ---
 def get_user_safe(request):
     if request.user.is_authenticated:
         return request.user
@@ -456,4 +463,4 @@ def user_profile_view(request):
         if serializer.is_valid():
             serializer.save()
             return Response({"message": "Updated"})
-        return Response(serializer.errors, 400)# Force Deploy v3 
+        return Response(serializer.errors, 400)
