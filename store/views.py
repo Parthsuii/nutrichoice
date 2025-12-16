@@ -29,10 +29,10 @@ MISTRAL_KEY = os.environ.get("MISTRAL_API_KEY")
 SITE_URL = "https://nutrichoice.onrender.com"
 APP_NAME = "NutriChoice"
 
+# --- HELPERS ---
 def normalize_food_name(name):
     if not name: return "unknown"
-    clean = name.lower().strip()
-    return clean
+    return name.lower().strip()
 
 def encode_image(image_file):
     image_file.seek(0)
@@ -49,8 +49,55 @@ def safe_json_extract(text):
         return json.loads(fixed_text)
     except: return None
 
+# --- SAFETY NET FUNCTION (Improved Logic) ---
+def enrich_meal_data(meal):
+    """Ensures every meal has a recipe and valid nutrients."""
+    # 1. Ensure Name
+    if 'name' not in meal: meal['name'] = "Healthy Choice"
+    
+    # 2. Ensure Calories
+    cals = meal.get('calories', 400)
+    if isinstance(cals, str): 
+        # Extract digits if string provided (e.g. "400 kcal")
+        cals = int("".join(filter(str.isdigit, cals)) or 400)
+    meal['calories'] = cals
+
+    # 3. Ensure Recipe
+    if 'recipe' not in meal or not meal['recipe']:
+        name_lower = meal['name'].lower()
+        if "salad" in name_lower:
+            meal['recipe'] = ["Chop all vegetables.", "Mix in a bowl.", "Add dressing.", "Serve fresh."]
+        elif "shake" in name_lower or "smoothie" in name_lower:
+            meal['recipe'] = ["Add ingredients to blender.", "Blend until smooth.", "Pour and serve."]
+        elif "oats" in name_lower:
+            meal['recipe'] = ["Boil liquid.", "Add oats.", "Cook for 5 mins.", "Add toppings."]
+        else:
+            meal['recipe'] = ["Prep ingredients.", "Cook main protein.", "Combine with sides.", "Serve warm."]
+
+    # 4. Ensure Nutrients (Zero-Check Improvement)
+    nutrients = meal.get('nutrients', {})
+    # Calculate sum safely handling potential strings
+    total_val = 0
+    try:
+        total_val = sum(int(v) for v in nutrients.values() if isinstance(v, (int, float, str)) and str(v).isdigit())
+    except: pass
+
+    # If missing or effectively zero, calculate defaults
+    if not nutrients or total_val < 5:
+        p = int((cals * 0.25) / 4) # 25% Protein
+        f = int((cals * 0.30) / 9) # 30% Fat
+        c = int((cals * 0.45) / 4) # 45% Carbs
+        meal['nutrients'] = { "protein": p, "fat": f, "carbs": c }
+    
+    # 5. Flatten for Frontend Compatibility
+    meal['protein'] = meal['nutrients'].get('protein', 0)
+    meal['fat'] = meal['nutrients'].get('fat', 0)
+    meal['carbs'] = meal['nutrients'].get('carbs', 0)
+
+    return meal
+
 # =========================================================================
-# 1. SMART SCANNER (Google -> Mistral -> OpenRouter)
+# 1. SMART SCANNER
 # =========================================================================
 @method_decorator(csrf_exempt, name='dispatch')
 class ScanFoodView(APIView):
@@ -61,151 +108,93 @@ class ScanFoodView(APIView):
     def post(self, request):
         image_file = request.FILES.get('image')
         text_query = request.data.get('food_name') or request.data.get('query')
-        
         data = None
         source_used = "None"
-        food_name_normalized = ""
 
         if image_file:
-            print("📸 IMAGE SCAN: Processing...")
+            print("📸 IMAGE SCAN...")
             b64 = encode_image(image_file)
-            prompt = """Analyze this food. Return STRICT JSON: { "food_name": "Paneer", "estimated_calories": 300, "protein": 10, "carbs": 20, "fat": 15, "ingredients": ["paneer"], "confidence_score": 90 }"""
+            prompt = """Analyze food. JSON: { "food_name": "Paneer", "estimated_calories": 300, "protein": 10, "carbs": 20, "fat": 15, "ingredients": ["paneer"] }"""
             
-            # 1. GOOGLE DIRECT (Vision)
-            if GOOGLE_KEY:
-                genai.configure(api_key=GOOGLE_KEY)
-                try:
-                    model = genai.GenerativeModel('gemini-2.0-flash-exp')
-                    res = model.generate_content(
-                        [{'mime_type': 'image/jpeg', 'data': b64}, prompt],
-                        generation_config={"response_mime_type": "application/json"}
-                    )
-                    if res.text:
-                        data = safe_json_extract(res.text)
-                        source_used = "Google Vision (Gemini 2.0)"
-                except Exception as e: print(f"   ❌ Google Failed: {e}")
-
-            # 2. MISTRAL DIRECT (Pixtral Vision)
-            if not data and MISTRAL_KEY:
-                try:
-                    print("   👉 Trying Mistral Direct (Pixtral)...")
-                    client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=MISTRAL_KEY)
-                    res = client.chat.completions.create(
-                        model="pixtral-12b-2409",
-                        messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
-                    )
-                    data = safe_json_extract(res.choices[0].message.content)
-                    source_used = "Mistral Direct (Pixtral)"
-                except Exception as e: print(f"   ❌ Mistral Failed: {e}")
-
-            # 3. OPENROUTER (Fallback)
-            if not data and OPENROUTER_KEY:
-                try:
-                    print("   👉 Trying OpenRouter Fallback...")
-                    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
-                    res = client.chat.completions.create(
-                        model="google/gemini-2.0-flash-exp:free",
-                        messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
-                    )
-                    data = safe_json_extract(res.choices[0].message.content)
-                    source_used = "OpenRouter Vision"
-                except: pass
-
-        elif text_query:
-            food_name_normalized = normalize_food_name(str(text_query))
-            print(f"🔍 TEXT SCAN: Checking '{food_name_normalized}'...")
-            
-            cached = FoodKnowledge.objects.filter(name__iexact=food_name_normalized).first()
-            if cached:
-                print(f"⚡ CACHE HIT: {cached.name}")
-                return Response({
-                    "saved_data": { "food_name": cached.name.title(), "estimated_calories": cached.calories, "protein": cached.protein, "carbs": cached.carbs, "fat": cached.fat, "ingredients": cached.ingredients },
-                    "source": "Local Knowledge Base"
-                })
-
-            prompt = f"Analyze '{food_name_normalized}'. JSON: {{ \"food_name\": \"{food_name_normalized}\", \"estimated_calories\": 0, \"protein\": 0, \"carbs\": 0, \"fat\": 0, \"ingredients\": [] }}"
-            
+            # 1. Google
             if GOOGLE_KEY:
                 try:
                     genai.configure(api_key=GOOGLE_KEY)
-                    model = genai.GenerativeModel('gemini-2.0-flash-exp')
-                    res = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-                    data = safe_json_extract(res.text)
-                    if data: source_used = "Google Text"
+                    m = genai.GenerativeModel('gemini-2.0-flash-exp')
+                    res = m.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt], generation_config={"response_mime_type": "application/json"})
+                    if res.text:
+                        data = safe_json_extract(res.text)
+                        source_used = "Google Vision"
                 except: pass
-
+            
+            # 2. Mistral Direct (Syntax Fixed)
             if not data and MISTRAL_KEY:
-                try:
+                try: 
                     client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=MISTRAL_KEY)
                     res = client.chat.completions.create(
-                        model="mistral-small-latest",
-                        messages=[{"role": "user", "content": prompt}],
-                        response_format={"type": "json_object"}
+                        model="pixtral-12b-2409", 
+                        messages=[{
+                            "role": "user", 
+                            "content": [
+                                {"type": "text", "text": prompt}, 
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                            ]
+                        }] 
                     )
                     data = safe_json_extract(res.choices[0].message.content)
-                    source_used = "Mistral Direct"
-                except: pass
+                    source_used = "Mistral Vision"
+                except Exception as e: print(f"Mistral Error: {e}")
 
-            if not data and OPENROUTER_KEY:
+        elif text_query:
+            print(f"🔍 TEXT SCAN: {text_query}")
+            prompt = f"Analyze '{text_query}'. JSON: {{ \"food_name\": \"{text_query}\", \"estimated_calories\": 200, \"protein\": 10, \"carbs\": 20, \"fat\": 5, \"ingredients\": [] }}"
+            
+            # 1. Check Cache
+            name_clean = normalize_food_name(str(text_query))
+            cached = FoodKnowledge.objects.filter(name__iexact=name_clean).first()
+            if cached:
+                return Response({
+                    "saved_data": { "food_name": cached.name.title(), "estimated_calories": cached.calories, "protein": cached.protein, "carbs": cached.carbs, "fat": cached.fat, "ingredients": cached.ingredients },
+                    "source": "Local Cache"
+                })
+
+            # 2. Google
+            if GOOGLE_KEY:
                 try:
-                    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
-                    res = client.chat.completions.create(
-                        model="google/gemini-2.0-flash-exp:free",
-                        messages=[{"role": "user", "content": prompt}]
-                    )
-                    data = safe_json_extract(res.choices[0].message.content)
-                    source_used = "OpenRouter Text"
+                    genai.configure(api_key=GOOGLE_KEY)
+                    m = genai.GenerativeModel('gemini-2.0-flash-exp')
+                    res = m.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+                    data = safe_json_extract(res.text)
+                    source_used = "Google Text"
                 except: pass
 
         if data:
             name = normalize_food_name(data.get('food_name', 'Unknown'))
-            try:
-                c_raw = str(data.get('estimated_calories', 0))
-                c_clean = "".join(filter(str.isdigit, c_raw))
-                cals = int(c_clean) if c_clean else 0
-                prot = float(data.get('protein', 0))
-                carbs = float(data.get('carbs', 0))
-                fat = float(data.get('fat', 0))
-                ingredients = data.get('ingredients', [])
-            except: cals, prot, carbs, fat, ingredients = 0, 0, 0, 0, []
-
+            cals = int(data.get('estimated_calories', 0))
             if name != "unknown":
                 fk = None
+                # Only update cache if calories are valid (>0)
                 if cals > 0:
-                    fk, _ = FoodKnowledge.objects.update_or_create(
-                        name=name,
-                        defaults={'calories': cals, 'protein': prot, 'carbs': carbs, 'fat': fat, 'ingredients': ingredients, 'source': source_used}
-                    )
+                    fk, _ = FoodKnowledge.objects.update_or_create(name=name, defaults={'calories': cals, 'protein': data.get('protein',0), 'carbs': data.get('carbs',0), 'fat': data.get('fat',0), 'source': source_used})
                 else:
                     fk = FoodKnowledge.objects.filter(name=name).first()
-
-                FoodItem.objects.create(
-                    user=request.user if request.user.is_authenticated else None, 
-                    name=name.title(), 
-                    calories=cals, protein=prot, carbs=carbs, fat=fat, 
-                    knowledge_source=fk
-                )
-
-            return Response({
-                "message": "Success", 
-                "saved_data": { "id": 0, "food_name": name.title(), "estimated_calories": cals, "protein": prot, "carbs": carbs, "fat": fat, "ingredients": ingredients }, 
-                "source": source_used
-            })
+                
+                FoodItem.objects.create(user=request.user if request.user.is_authenticated else None, name=name.title(), calories=cals, protein=data.get('protein',0), carbs=data.get('carbs',0), fat=data.get('fat',0), knowledge_source=fk)
+            
+            return Response({"message": "Success", "saved_data": data, "source": source_used})
         
-        return Response({"error": "AI Busy. Manual entry required."}, 422)
+        return Response({"error": "Scan failed"}, 422)
 
 # =========================================================================
-# 2. SMART MEAL PLANNER (With Recipe & Macros)
+# 2. SMART MEAL PLANNER
 # =========================================================================
 @csrf_exempt
 @api_view(['POST'])
 def generate_meal_plan(request):
     user = User.objects.first() 
-    if not user: return Response({"error": "No user profile"}, 400)
+    if not user: return Response({"error": "No user"}, 400)
     profile, _ = UserProfile.objects.get_or_create(user=user)
     
-    # 1. EXTRACT DATA
-    print("🍱 MEAL PLAN REQUEST:")
     app_target = request.data.get('daily_calories')
     daily_target = int(app_target) if (app_target and int(app_target) > 0) else (profile.daily_calorie_target or 2200)
     context = request.data.get('activity_context', 'Standard')
@@ -217,32 +206,25 @@ def generate_meal_plan(request):
     total_eaten = sum(item.calories for item in eaten_today)
     remaining_cals = daily_target - total_eaten
     
-    print(f"   - Gap: {remaining_cals} kcal (Target {daily_target})")
+    print(f"🍱 PLAN: Target {daily_target} | Gap {remaining_cals}")
 
-    pantry_text = ", ".join(ingredients) if ingredients else "Simple ingredients"
-    
-    # 2. DETERMINE SCHEDULE (Force Multi-Meal)
-    meal_instruction = "Generate at least 3 meals (Breakfast, Lunch, Dinner)."
-    if current_hour > 20:
-        meal_instruction = "Late Night: Generate 1 light snack."
-    elif current_hour > 14:
-        meal_instruction = "Afternoon: Generate 2 meals (Snack + Dinner)."
-    elif remaining_cals < 500:
-        meal_instruction = "Low Calorie: Generate 2 small snacks."
+    meal_instruction = "Generate 3 meals (Breakfast, Lunch, Dinner)."
+    if current_hour > 20: meal_instruction = "Late Night: 1 light snack."
+    elif current_hour > 14: meal_instruction = "Afternoon: 2 meals (Snack + Dinner)."
+    elif remaining_cals < 500: meal_instruction = "Low Calorie: 2 small snacks."
 
-    # 3. PROMPT (Strict Structure)
     prompt = f"""
-    You are a professional Nutritionist API. Output strictly valid JSON.
+    Act as a Nutritionist. Output strict JSON.
     
-    TASK: Plan meals to fill exactly {remaining_cals} calories.
-    - Current Time: {current_hour}:00
+    TASK: Plan meals to fill {remaining_cals} calories.
+    - Time: {current_hour}:00
     - Context: {context}
-    - Pantry: {pantry_text}
-    - Requirement: {meal_instruction}
+    - Schedule: {meal_instruction}
+    - Ingredients: {", ".join(ingredients)}
 
-    REQUIRED JSON STRUCTURE (Must include 'nutrients' object and 'recipe' list):
+    REQUIRED JSON:
     {{
-      "analysis": "Brief explanation.",
+      "analysis": "Brief reason.",
       "meals": [
         {{
            "name": "Dish Name",
@@ -250,88 +232,58 @@ def generate_meal_plan(request):
            "calories": 400,
            "nutrients": {{ "protein": 20, "carbs": 40, "fat": 10 }}, 
            "ingredients": ["Item 1", "Item 2"],
-           "recipe": [
-              "Step 1: Prep ingredients.",
-              "Step 2: Cook method.",
-              "Step 3: Serve."
-           ]
+           "recipe": ["Step 1", "Step 2", "Step 3"]
         }}
       ]
     }}
     """
 
     plan_text = None
-    ai_source = "None"
-
-    # --- 1. GOOGLE DIRECT ---
+    
+    # 1. Google
     if GOOGLE_KEY:
         try:
-            print("   👉 1. Trying Google Gemini 2.0...")
             genai.configure(api_key=GOOGLE_KEY)
             m = genai.GenerativeModel('gemini-2.0-flash-exp')
-            plan_text = m.generate_content(
-                prompt, 
-                generation_config={"response_mime_type": "application/json"}
-            ).text
-            ai_source = "Google Gemini"
-        except Exception as e: print(f"   ❌ Google Failed: {e}")
+            plan_text = m.generate_content(prompt, generation_config={"response_mime_type": "application/json"}).text
+        except: pass
 
-    # --- 2. MISTRAL DIRECT ---
+    # 2. Mistral Direct
     if not plan_text and MISTRAL_KEY:
         try:
-            print("   👉 2. Trying Mistral Direct...")
             client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=MISTRAL_KEY)
             res = client.chat.completions.create(
                 model="mistral-small-latest", 
-                messages=[
-                    {"role": "system", "content": "You are a JSON generator. Always include 'nutrients' object and 'recipe' list."}, 
-                    {"role": "user", "content": prompt}
-                ],
+                messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"}
             )
             plan_text = res.choices[0].message.content
-            ai_source = "Mistral Direct"
-        except Exception as e: print(f"   ❌ Mistral Failed: {e}")
+        except: pass
 
-    # --- 3. OPENROUTER ---
+    # 3. OpenRouter (Fallback)
     if not plan_text and OPENROUTER_KEY:
         try:
-            print("   👉 3. Trying OpenRouter Fallback...")
             client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
             res = client.chat.completions.create(
                 model="google/gemini-2.0-flash-exp:free", 
                 messages=[{"role": "user", "content": prompt}]
             )
             plan_text = res.choices[0].message.content
-            ai_source = "OpenRouter"
         except: pass
 
     if plan_text:
-        print(f"   ✅ AI Success via {ai_source}")
         data = safe_json_extract(plan_text)
         if data and "meals" in data and isinstance(data["meals"], list):
+            # Apply Safety Net
+            data['meals'] = [enrich_meal_data(m) for m in data['meals']]
             return Response(data)
 
-    print("   ⚠️ Sending Hard Fallback Meal")
+    # Fallback with FULL DATA (Enriched)
     return Response({
-        "analysis": "AI busy. Here is a complete default plan.",
+        "analysis": "AI busy. Default plan loaded.",
         "meals": [
-            { 
-                "name": "Masala Oats & Milk", 
-                "time": "Breakfast",
-                "calories": 350, 
-                "nutrients": { "protein": 12, "carbs": 45, "fat": 8 },
-                "ingredients": ["Oats", "Milk", "Vegetables", "Spices"],
-                "recipe": ["Boil milk and oats.", "Add chopped veggies and spices.", "Cook for 5 mins until thick."]
-            },
-            { 
-                "name": "Paneer Salad", 
-                "time": "Lunch",
-                "calories": 400, 
-                "nutrients": { "protein": 20, "carbs": 15, "fat": 25 },
-                "ingredients": ["Paneer", "Cucumber", "Tomato", "Lemon"],
-                "recipe": ["Cube the paneer.", "Chop vegetables.", "Toss everything with lemon juice and salt."]
-            }
+            enrich_meal_data({ "name": "Oats & Milk", "calories": 350, "time": "Breakfast" }),
+            enrich_meal_data({ "name": "Chicken Salad", "calories": 450, "time": "Lunch" })
         ]
     })
 
@@ -343,9 +295,7 @@ def swap_meal(request):
     context = request.data.get('context', 'Standard')
     
     prompt = f"""
-    Suggest replacement for '{old_meal}' (~{calories} kcal). Context: {context}. 
-    Return strictly nested JSON with 'nutrients' and 'recipe'.
-    
+    Suggest replacement for '{old_meal}' (~{calories} kcal). Context: {context}.
     JSON: {{ "name": "...", "calories": {calories}, "nutrients": {{ "protein": 0, "carbs": 0, "fat": 0 }}, "ingredients": [], "recipe": ["Step 1", "Step 2"] }}
     """
     
@@ -357,27 +307,17 @@ def swap_meal(request):
             plan_text = m.generate_content(prompt, generation_config={"response_mime_type": "application/json"}).text
         except: pass
     
-    if not plan_text and MISTRAL_KEY:
-        try:
-            client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=MISTRAL_KEY)
-            res = client.chat.completions.create(
-                model="mistral-small-latest", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"}
-            )
-            plan_text = res.choices[0].message.content
-        except: pass
-
     if plan_text:
         data = safe_json_extract(plan_text)
-        if data: return Response(data)
+        if data: 
+            return Response(enrich_meal_data(data))
 
-    return Response({
-        "name": "Masala Oats", "calories": calories, 
-        "nutrients": { "protein": 8, "carbs": 40, "fat": 5 },
-        "ingredients": ["Oats", "Spices"], "recipe": ["Boil water", "Add oats & spices"]
-    })
+    return Response(enrich_meal_data({
+        "name": "Masala Oats", "calories": calories
+    }))
 
 # ==========================================
-# 3. ROSTER ANALYZER (Google -> Mistral Pixtral -> OpenRouter)
+# 3. ROSTER ANALYZER (Corrected Syntax)
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):
@@ -389,45 +329,42 @@ class AnalyzeRosterView(APIView):
         if 'file' not in request.FILES: return Response({"error": "No file"}, 400)
         img = request.FILES['file']
         b64 = encode_image(img)
+        prompt = "Analyze timetable. JSON: { \"weekly_schedule\": { \"Monday\": [{\"time\": \"10:00\", \"event\": \"Math\"}] } }"
         
-        prompt = """
-        Analyze this timetable/roster image. 
-        Extract the schedule into strict JSON format.
-        JSON Structure: { "weekly_schedule": { "Monday": [{"time": "10:00", "event": "Math"}], "Tuesday": [] } }
-        """
-        data = None
-
-        # 1. GOOGLE DIRECT
+        # 1. Google
         if GOOGLE_KEY:
             try:
-                print("📅 Analyzing Roster (Google)...")
                 genai.configure(api_key=GOOGLE_KEY)
                 m = genai.GenerativeModel('gemini-2.0-flash-exp')
                 res = m.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt], generation_config={"response_mime_type": "application/json"})
-                if res.text: data = safe_json_extract(res.text)
-            except Exception as e: print(f"   ❌ Google Failed: {e}")
+                if res.text: return Response(safe_json_extract(res.text))
+            except: pass
 
-        # 2. MISTRAL DIRECT (Pixtral)
-        if not data and MISTRAL_KEY:
+        # 2. Mistral Direct (Syntax Fixed)
+        if MISTRAL_KEY:
             try:
-                print("📅 Analyzing Roster (Mistral Pixtral)...")
                 client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=MISTRAL_KEY)
                 res = client.chat.completions.create(
-                    model="pixtral-12b-2409",
-                    messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]
+                    model="pixtral-12b-2409", 
+                    messages=[{
+                        "role": "user", 
+                        "content": [
+                            {"type": "text", "text": prompt}, 
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                        ]
+                    }] 
                 )
-                data = safe_json_extract(res.choices[0].message.content)
-            except Exception as e: print(f"   ❌ Mistral Failed: {e}")
+                return Response(safe_json_extract(res.choices[0].message.content))
+            except: pass
 
-        if data: return Response(data)
-        return Response({"error": "Busy. Please try again in 1 minute."}, 503)
+        return Response({"error": "Busy"}, 503)
 
+# ... Standard Views ...
 @csrf_exempt 
 @api_view(['GET'])
 @authentication_classes([])
 @permission_classes([])
-def ai_status_check(request):
-    return Response({"Status": "Online"})
+def ai_status_check(request): return Response({"Status": "Online"})
 
 class FoodItemList(ListCreateAPIView):
     queryset = FoodItem.objects.all().order_by('-created_at')
