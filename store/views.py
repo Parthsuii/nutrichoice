@@ -13,7 +13,7 @@ import os
 import base64
 import json
 import re 
-import requests # NEW: For OpenRouter Calls
+import requests # NEW: For OpenRouter & Moondream Calls
 
 # --- HYBRID LIBRARIES ---
 from openai import OpenAI 
@@ -24,9 +24,10 @@ from .models import FoodItem, UserProfile, FoodKnowledge
 from .serializers import FoodItemSerializer, UserProfileSerializer
 
 # --- CONFIGURATION ---
-OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY") # Ensure this is set in Render
+OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY") 
 GOOGLE_KEY = os.environ.get("GOOGLE_API_KEY") 
 MISTRAL_KEY = os.environ.get("MISTRAL_API_KEY") 
+MOONDREAM_KEY = os.environ.get("MOONDREAM_API_KEY") # NEW: Add to Render Env Vars
 
 SITE_URL = "https://nutrichoice.onrender.com"
 APP_NAME = "NutriChoice"
@@ -53,6 +54,31 @@ def safe_json_extract(text):
         fixed_text = re.sub(r'(:\s*)([a-zA-Z_]\w*)(?=\s*[,}])', r'\1"\2"', fixed_text)
         return json.loads(fixed_text)
     except: return None
+
+# --- HELPER: MOONDREAM DIRECT CALL ---
+def call_moondream(prompt, b64_image):
+    """Direct call to Moondream Cloud API (Tiny & Fast Vision Model)."""
+    if not MOONDREAM_KEY: return None
+    
+    headers = {"X-Moondream-Auth": MOONDREAM_KEY}
+    data = {
+        "image_url": f"data:image/jpeg;base64,{b64_image}",
+        "question": f"{prompt} Respond ONLY with valid JSON.",
+        "stream": False
+    }
+    
+    try:
+        logger.info("🌑 Vision: Trying Moondream AI...")
+        response = requests.post("https://api.moondream.ai/v1/query", headers=headers, json=data, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            return safe_json_extract(result.get("answer", ""))
+        else:
+            logger.error(f"❌ Moondream Failed: {response.text}")
+    except Exception as e:
+        logger.error(f"❌ Moondream Error: {e}")
+    return None
 
 # --- HELPER: OPENROUTER VISION CALL ---
 def call_openrouter_vision(model_name, prompt, b64_image):
@@ -82,7 +108,6 @@ def call_openrouter_vision(model_name, prompt, b64_image):
     }
     
     try:
-        # 45s timeout per model to keep total wait reasonable
         response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=45)
         if response.status_code == 200:
             content = response.json()['choices'][0]['message']['content']
@@ -91,6 +116,30 @@ def call_openrouter_vision(model_name, prompt, b64_image):
             logger.error(f"❌ OpenRouter ({model_name}) Failed: {response.text}")
     except Exception as e:
         logger.error(f"❌ OpenRouter Error: {e}")
+    return None
+
+# --- HELPER: OPENROUTER TEXT CALL ---
+def call_openrouter_text(model_name, prompt):
+    """Generic handler for Text-only queries via OpenRouter."""
+    if not OPENROUTER_KEY: return None
+    
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": SITE_URL, 
+        "X-Title": APP_NAME,
+    }
+    data = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    
+    try:
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=30)
+        if response.status_code == 200:
+            content = response.json()['choices'][0]['message']['content']
+            return safe_json_extract(content)
+    except: pass
     return None
 
 # --- SAFETY NET FUNCTION ---
@@ -144,7 +193,7 @@ def get_user_safe(request):
     return User.objects.first()
 
 # =========================================================================
-# 1. SMART SCANNER
+# 1. SMART SCANNER (UPDATED 5-MODEL STRATEGY)
 # =========================================================================
 @method_decorator(csrf_exempt, name='dispatch')
 class ScanFoodView(APIView):
@@ -158,11 +207,13 @@ class ScanFoodView(APIView):
         data = None
         source_used = "None"
 
+        # --- A. IMAGE SCAN STRATEGY ---
         if image_file:
-            logger.info("📸 IMAGE SCAN: Processing started...")
+            logger.info("📸 Food Scan: Processing image...")
             b64 = encode_image(image_file)
-            prompt = """Analyze food. JSON: { "food_name": "Paneer", "estimated_calories": 300, "protein": 10, "carbs": 20, "fat": 15, "ingredients": ["paneer"] }"""
+            prompt = """Analyze food image. JSON: { "food_name": "Paneer", "estimated_calories": 300, "protein": 10, "carbs": 20, "fat": 15, "ingredients": ["paneer"] }"""
             
+            # 1. Google Gemini 2.0 (Primary)
             if GOOGLE_KEY:
                 try:
                     genai.configure(api_key=GOOGLE_KEY)
@@ -172,8 +223,9 @@ class ScanFoodView(APIView):
                         data = safe_json_extract(res.text)
                         source_used = "Google Vision"
                 except Exception as e:
-                    logger.error(f"❌ Google Vision Failed: {e}")
+                    logger.warning(f"⚠️ Google Failed: {e}")
 
+            # 2. Mistral Pixtral (Backup 1)
             if not data and MISTRAL_KEY:
                 try: 
                     client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=MISTRAL_KEY)
@@ -181,21 +233,38 @@ class ScanFoodView(APIView):
                     data = safe_json_extract(res.choices[0].message.content)
                     source_used = "Mistral Vision"
                 except Exception as e:
-                    logger.error(f"❌ Mistral Vision Failed: {e}")
+                    logger.warning(f"⚠️ Mistral Failed: {e}")
 
+            # 3. Moondream 2 (Backup 2 - Fast)
+            if not data:
+                data = call_moondream(prompt, b64)
+                if data: source_used = "Moondream AI"
+
+            # 4. Llama 3.2 Vision (Backup 3)
+            if not data:
+                data = call_openrouter_vision("meta-llama/llama-3.2-90b-vision-instruct", prompt, b64)
+                if data: source_used = "Llama 3.2 Vision"
+
+            # 5. Gemma 3 (Backup 4)
+            if not data:
+                data = call_openrouter_vision("google/gemma-3-27b-it", prompt, b64)
+                if data: source_used = "Gemma 3 Vision"
+
+        # --- B. TEXT SCAN STRATEGY ---
         elif text_query:
-            logger.info(f"🔍 TEXT SCAN: {text_query}")
+            logger.info(f"🔍 Text Scan: {text_query}")
             prompt = f"Analyze '{text_query}'. JSON: {{ \"food_name\": \"{text_query}\", \"estimated_calories\": 200, \"protein\": 10, \"carbs\": 20, \"fat\": 5, \"ingredients\": [] }}"
             
+            # 1. Local Cache (Instant)
             name_clean = normalize_food_name(str(text_query))
             cached = FoodKnowledge.objects.filter(name__iexact=name_clean).first()
             if cached:
-                logger.info(f"⚡ CACHE HIT: {name_clean}")
                 return Response({
                     "saved_data": { "food_name": cached.name.title(), "estimated_calories": cached.calories, "protein": cached.protein, "carbs": cached.carbs, "fat": cached.fat, "ingredients": cached.ingredients },
                     "source": "Local Cache"
                 })
 
+            # 2. Google Gemini (Primary)
             if GOOGLE_KEY:
                 try:
                     genai.configure(api_key=GOOGLE_KEY)
@@ -204,31 +273,34 @@ class ScanFoodView(APIView):
                     data = safe_json_extract(res.text)
                     source_used = "Google Text"
                 except Exception as e:
-                    logger.error(f"❌ Google Text Scan Failed: {e}")
+                    logger.error(f"❌ Google Text Failed: {e}")
 
+            # 3. Llama 3.3 70B (Backup - Excellent at Logic)
+            if not data:
+                data = call_openrouter_text("meta-llama/llama-3.3-70b-instruct", prompt)
+                if data: source_used = "Llama 3.3 Text"
+
+        # --- C. SAVE & RETURN ---
         if data:
             name = normalize_food_name(data.get('food_name', 'Unknown'))
             cals = int(data.get('estimated_calories', 0))
             if name != "unknown":
                 fk = None
                 ingredients = data.get('ingredients', [])
-                if not isinstance(ingredients, list) or len(ingredients) < 2:
-                    ingredients = [] 
+                if not isinstance(ingredients, list) or len(ingredients) < 2: ingredients = [] 
 
                 if cals > 0:
                     fk, _ = FoodKnowledge.objects.update_or_create(
                         name=name, 
                         defaults={'calories': cals, 'protein': data.get('protein',0), 'carbs': data.get('carbs',0), 'fat': data.get('fat',0), 'ingredients': ingredients, 'source': source_used}
                     )
-                else:
-                    fk = FoodKnowledge.objects.filter(name=name).first()
                 
                 user = get_user_safe(request)
                 FoodItem.objects.create(user=user, name=name.title(), calories=cals, protein=data.get('protein',0), carbs=data.get('carbs',0), fat=data.get('fat',0), knowledge_source=fk)
             
             return Response({"message": "Success", "saved_data": data, "source": source_used})
         
-        return Response({"error": "Scan failed"}, 422)
+        return Response({"error": "All 5 AI Agents failed. Try typing the name manually."}, 422)
 
 # =========================================================================
 # 2. SMART MEAL PLANNER
@@ -413,7 +485,7 @@ def generate_workout(request):
     })
 
 # ==========================================
-# 4. ROSTER ANALYZER (UPDATED QUAD-MODEL FALLBACK)
+# 4. ROSTER ANALYZER (UPDATED 5-MODEL STRATEGY)
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):
@@ -425,12 +497,12 @@ class AnalyzeRosterView(APIView):
         if 'file' not in request.FILES: return Response({"error": "No file"}, 400)
         img = request.FILES['file']
         b64 = encode_image(img)
-        prompt = "Analyze this timetable/roster image. Extract classes/events. Output strictly this JSON structure: { \"weekly_schedule\": { \"Monday\": [{\"time\": \"10:00\", \"event\": \"Math\"}] } }"
         
-        # --- STRATEGY 1: GOOGLE GEMINI 2.0 (Fastest) ---
+        prompt = "Analyze this timetable. JSON: { \"weekly_schedule\": { \"Monday\": [{\"time\": \"10:00\", \"event\": \"Math\"}] } }"
+        
+        # 1. GOOGLE GEMINI 2.0 (Primary - Fastest/Best)
         if GOOGLE_KEY:
             try:
-                logger.info("📅 Roster: Trying Google Gemini 2.0...")
                 genai.configure(api_key=GOOGLE_KEY)
                 m = genai.GenerativeModel('gemini-2.0-flash-exp')
                 res = m.generate_content([{'mime_type': 'image/jpeg', 'data': b64}, prompt], generation_config={"response_mime_type": "application/json"})
@@ -438,29 +510,30 @@ class AnalyzeRosterView(APIView):
             except Exception as e:
                 logger.warning(f"⚠️ Google Failed: {e}")
 
-        # --- STRATEGY 2: MISTRAL PIXTRAL (Reliable Backup) ---
+        # 2. MISTRAL PIXTRAL (Backup 1 - Strong Table Logic)
         if MISTRAL_KEY:
             try:
-                logger.info("📅 Roster: Trying Mistral Pixtral...")
                 client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=MISTRAL_KEY)
                 res = client.chat.completions.create(model="pixtral-12b-2409", messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}])
                 return Response(safe_json_extract(res.choices[0].message.content))
             except Exception as e:
                 logger.warning(f"⚠️ Mistral Failed: {e}")
 
-        # --- STRATEGY 3: LLAMA 3.2 VISION (Reasoning Power) ---
-        logger.info("📅 Roster: Trying Llama 3.2 Vision...")
-        # Llama 3.2 90B Vision Instruct is SOTA for OCR tasks
+        # 3. MOONDREAM 2 (Backup 2 - Tiny & Fast)
+        res_moondream = call_moondream(prompt, b64)
+        if res_moondream: return Response(res_moondream)
+
+        # 4. LLAMA 3.2 VISION (Backup 3 - Heavy Logic)
+        logger.info("📅 Roster: Trying Llama 3.2...")
         res_llama = call_openrouter_vision("meta-llama/llama-3.2-90b-vision-instruct", prompt, b64)
         if res_llama: return Response(res_llama)
 
-        # --- STRATEGY 4: GEMMA 3 (Latest Google Model) ---
+        # 5. GEMMA 3 (Backup 4 - Google Open Model)
         logger.info("📅 Roster: Trying Gemma 3...")
-        # Gemma 3 27B Instruct offers multimodal capabilities
         res_gemma = call_openrouter_vision("google/gemma-3-27b-it", prompt, b64)
         if res_gemma: return Response(res_gemma)
 
-        return Response({"error": "All AI agents busy. Please try later."}, 503)
+        return Response({"error": "All 5 AI agents failed. Please crop the image and try again."}, 503)
 
 # ... Standard Views ...
 @csrf_exempt 

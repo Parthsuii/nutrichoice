@@ -1,10 +1,10 @@
 import 'dart:io';
-import 'dart:math'; // For min function
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-// 1. ADD ML KIT IMPORT
-import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
-import '../services/api_service.dart'; 
+import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart'; // Required for MediaType
+import 'package:shared_preferences/shared_preferences.dart';
 
 class MealLogScreen extends StatefulWidget {
   const MealLogScreen({super.key});
@@ -14,9 +14,12 @@ class MealLogScreen extends StatefulWidget {
 }
 
 class _MealLogScreenState extends State<MealLogScreen> {
-  List<Map<String, dynamic>> _mealHistory = [];
-  bool _isLoading = false;
-  
+  final TextEditingController _textController = TextEditingController();
+  File? _image;
+  bool _isAnalyzing = false;
+  String _statusMessage = "Scan a meal to track calories."; // Feedback state
+  List<Map<String, dynamic>> _loggedMeals = [];
+
   // Daily Totals
   int _totalCalories = 0;
   double _totalProtein = 0;
@@ -26,67 +29,35 @@ class _MealLogScreenState extends State<MealLogScreen> {
   @override
   void initState() {
     super.initState();
-    _fetchFoodHistory(); 
+    _loadMeals();
   }
 
-  // --- 1. LOAD DATA ---
-  Future<void> _fetchFoodHistory() async {
-    setState(() => _isLoading = true);
-    try {
-      final foods = await ApiService.getFoods();
-      
+  Future<void> _loadMeals() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String? logs = prefs.getString('meal_logs');
+    if (logs != null) {
       setState(() {
-        _mealHistory = foods.map((food) => {
-          "id": food['id'], 
-          "description": food['name'],
-          "calories": food['calories'],
-          "macros": {
-            "protein": food['protein'],
-            "carbs": food['carbs'] ?? 0,
-            "fat": food['fat'] ?? 0,
-          },
-        }).toList().cast<Map<String, dynamic>>();
-        
-        // Show newest first
-        _mealHistory = _mealHistory.toList(); 
+        _loggedMeals = List<Map<String, dynamic>>.from(jsonDecode(logs));
         _calculateTotals();
-        _isLoading = false;
       });
-    } catch (e) {
-      print("Offline or Error: $e");
-      setState(() => _isLoading = false);
     }
   }
 
-  // --- 2. DELETE FUNCTION ---
-  Future<void> _deleteMeal(int id, int index) async {
-    setState(() {
-      _mealHistory.removeAt(index);
-      _calculateTotals();
-    });
-
-    try {
-      await ApiService.deleteFood(id);
-      if(mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Meal deleted."), duration: Duration(seconds: 1)),
-        );
-      }
-    } catch (e) {
-      print("Could not delete from server: $e");
-    }
+  Future<void> _saveMeals() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('meal_logs', jsonEncode(_loggedMeals));
+    _calculateTotals();
   }
 
   void _calculateTotals() {
     int cals = 0;
     double p = 0, c = 0, f = 0;
-    for (var log in _mealHistory) {
-      cals += (log['calories'] as num).toInt();
-      if (log['macros'] != null) {
-        p += (log['macros']['protein'] as num).toDouble();
-        c += (log['macros']['carbs'] as num).toDouble();
-        f += (log['macros']['fat'] as num).toDouble();
-      }
+    for (var meal in _loggedMeals) {
+      cals += (meal['calories'] as num).toInt();
+      final macros = meal['macros'] ?? {};
+      p += (macros['protein'] as num?)?.toDouble() ?? 0;
+      c += (macros['carbs'] as num?)?.toDouble() ?? 0;
+      f += (macros['fat'] as num?)?.toDouble() ?? 0;
     }
     setState(() {
       _totalCalories = cals;
@@ -96,98 +67,87 @@ class _MealLogScreenState extends State<MealLogScreen> {
     });
   }
 
-  // --- 3. HYBRID SCANNER (OCR + VISION) ---
+  // --- 1. PICK IMAGE ---
   Future<void> _pickImage(ImageSource source) async {
-    final picker = ImagePicker();
-    final pickedFile = await picker.pickImage(source: source);
-    
-    if (pickedFile != null) {
-      setState(() => _isLoading = true);
-      
-      try {
-        final File imageFile = File(pickedFile.path);
-        String? extractedText;
-
-        // PHASE A: ON-DEVICE OCR (Instant & Free)
-        try {
-          print("⚡ Running On-Device OCR...");
-          final inputImage = InputImage.fromFile(imageFile);
-          final textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
-          final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
-          
-          String rawText = recognizedText.text.trim();
-          textRecognizer.close(); // Clean up
-
-          // HEURISTIC: Only use text if it looks like a real label (>4 chars)
-          if (rawText.length > 4) {
-             // Clean newlines to make it a single search query
-             extractedText = rawText.replaceAll("\n", " "); 
-             print("⚡ ML KIT FOUND: $extractedText");
-             
-             if(mounted) {
-               ScaffoldMessenger.of(context).showSnackBar(
-                 SnackBar(content: Text("Reading Label: '${extractedText.substring(0, min(20, extractedText.length))}...'"), backgroundColor: Colors.teal),
-               );
-             }
-          }
-        } catch (e) {
-          print("⚠️ OCR Failed (Falling back to Vision AI): $e");
-        }
-
-        // PHASE B: CALL BACKEND (Smart Scan)
-        // We pass 'extractedText'. 
-        // If it exists, backend uses Text Search (0 Cost).
-        // If null, backend uses Image Vision (1 Call).
-        final response = await ApiService.scanFoodSmart(imageFile, extractedText);
-
-        if (response['saved_data'] != null) {
-           final foodData = response['saved_data'];
-           
-           // Insert new meal at top
-           setState(() {
-             _mealHistory.insert(0, {
-                "id": foodData['id'] ?? 0, 
-                "description": foodData['food_name'],
-                "calories": foodData['estimated_calories'],
-                "macros": {
-                  "protein": foodData['protein'],
-                  "carbs": foodData['carbs'],
-                  "fat": foodData['fat'],
-                }
-             });
-             _calculateTotals();
-           });
-        }
-
-      } catch (e) {
-        if(mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Scan Failed: $e")));
-        }
-      } finally {
-        if(mounted) setState(() => _isLoading = false);
+    try {
+      final picker = ImagePicker();
+      final pickedFile = await picker.pickImage(source: source, imageQuality: 80);
+      if (pickedFile != null) {
+        setState(() => _image = File(pickedFile.path));
+        _analyzeFood(imageFile: _image);
       }
+    } catch (e) {
+      _showSnack("Error: $e", Colors.red);
     }
   }
 
-  void _showImageSourceSheet() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.grey.shade900,
-      builder: (ctx) => Wrap(
-        children: [
-          ListTile(
-            leading: const Icon(Icons.camera_alt, color: Colors.tealAccent),
-            title: const Text("Take Photo", style: TextStyle(color: Colors.white)),
-            onTap: () { Navigator.pop(ctx); _pickImage(ImageSource.camera); },
-          ),
-          ListTile(
-            leading: const Icon(Icons.image, color: Colors.blueAccent),
-            title: const Text("Upload from Gallery", style: TextStyle(color: Colors.white)),
-            onTap: () { Navigator.pop(ctx); _pickImage(ImageSource.gallery); },
-          ),
-        ],
-      ),
-    );
+  // --- 2. ANALYZE FOOD (5-Model Strategy) ---
+  Future<void> _analyzeFood({File? imageFile, String? textQuery}) async {
+    setState(() {
+      _isAnalyzing = true;
+      // Inform user of the fallback chain
+      _statusMessage = "Analyzing... (Gemini → Mistral → Moondream → Llama)";
+    });
+
+    try {
+      var uri = Uri.parse('https://nutrichoice-xvpf.onrender.com/api/scan-food/');
+      var request = http.MultipartRequest('POST', uri);
+
+      if (imageFile != null) {
+        request.files.add(await http.MultipartFile.fromPath(
+          'image', 
+          imageFile.path,
+          contentType: MediaType('image', 'jpeg'),
+        ));
+      } else if (textQuery != null) {
+        request.fields['food_name'] = textQuery;
+      }
+
+      // Extended timeout to 100s for fallback chain
+      var streamedResponse = await request.send().timeout(
+        const Duration(seconds: 100),
+        onTimeout: () {
+          throw Exception("Analysis timed out. 5 AI Agents attempted but were busy.");
+        },
+      );
+
+      var response = await http.Response.fromStream(streamedResponse);
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final foodData = data['saved_data'];
+        final source = data['source'] ?? "AI";
+
+        setState(() {
+          _loggedMeals.insert(0, {
+            "name": foodData['food_name'],
+            "calories": foodData['estimated_calories'],
+            "macros": {
+              "protein": foodData['protein'],
+              "carbs": foodData['carbs'],
+              "fat": foodData['fat']
+            },
+            "time": DateTime.now().toString(),
+            "source": source
+          });
+          _statusMessage = "Identified: ${foodData['food_name']} ($source)";
+          _image = null;
+          _textController.clear();
+        });
+        await _saveMeals();
+      } else {
+        setState(() => _statusMessage = "Server Error: ${response.statusCode}");
+      }
+    } catch (e) {
+      setState(() => _statusMessage = "Connection Error: $e");
+    } finally {
+      setState(() => _isAnalyzing = false);
+    }
+  }
+
+  void _showSnack(String msg, Color color) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: color));
   }
 
   @override
@@ -198,8 +158,13 @@ class _MealLogScreenState extends State<MealLogScreen> {
         title: const Text("Calorie Tracker"),
         backgroundColor: Colors.teal.shade900,
         actions: [
-          IconButton(icon: const Icon(Icons.refresh), onPressed: _fetchFoodHistory),
-          IconButton(icon: const Icon(Icons.add_a_photo), onPressed: () => _showImageSourceSheet()),
+          IconButton(
+            icon: const Icon(Icons.delete_outline),
+            onPressed: () async {
+              setState(() => _loggedMeals.clear());
+              await _saveMeals();
+            },
+          )
         ],
       ),
       body: Column(
@@ -225,67 +190,170 @@ class _MealLogScreenState extends State<MealLogScreen> {
                     _buildMacroStat("CARB", "${_totalCarbs.round()}g", Colors.orange),
                     _buildMacroStat("FAT", "${_totalFat.round()}g", Colors.red),
                   ],
-                )
+                ),
               ],
             ),
           ),
 
+          // INPUT AREA
+          Container(
+            padding: const EdgeInsets.all(16),
+            color: Colors.black,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Status Box
+                if (_isAnalyzing || _statusMessage.contains("Identified") || _statusMessage.contains("Error"))
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade900,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.white24),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.auto_awesome, size: 16, color: _isAnalyzing ? Colors.tealAccent : Colors.grey),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _statusMessage,
+                            style: TextStyle(color: _isAnalyzing ? Colors.tealAccent : Colors.grey, fontSize: 12),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _textController,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: InputDecoration(
+                          hintText: "Type food (e.g. 'Avocado Toast')",
+                          hintStyle: const TextStyle(color: Colors.white38),
+                          filled: true,
+                          fillColor: Colors.grey.shade900,
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                        ),
+                        onSubmitted: (val) {
+                          if (val.isNotEmpty) _analyzeFood(textQuery: val);
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    IconButton.filled(
+                      onPressed: () {
+                        if (_textController.text.isNotEmpty) _analyzeFood(textQuery: _textController.text);
+                      },
+                      icon: const Icon(Icons.send),
+                      style: IconButton.styleFrom(backgroundColor: Colors.teal),
+                    )
+                  ],
+                ),
+                const SizedBox(height: 15),
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _isAnalyzing ? null : () => _pickImage(ImageSource.camera),
+                        icon: const Icon(Icons.camera_alt),
+                        label: const Text("Camera"),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blue.shade900,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _isAnalyzing ? null : () => _pickImage(ImageSource.gallery),
+                        icon: const Icon(Icons.photo_library),
+                        label: const Text("Gallery"),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.purple.shade900,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          if (_isAnalyzing) const LinearProgressIndicator(color: Colors.tealAccent, backgroundColor: Colors.black),
+
           // FOOD LIST
           Expanded(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator(color: Colors.teal))
-                : _mealHistory.isEmpty
-                    ? const Center(child: Text("No meals logged yet.", style: TextStyle(color: Colors.grey)))
-                    : ListView.builder(
-                        padding: const EdgeInsets.all(16),
-                        itemCount: _mealHistory.length,
-                        itemBuilder: (context, index) {
-                          final log = _mealHistory[index];
-                          final macros = log['macros'];
-                          final int id = log['id'] ?? 0;
-
-                          return Card(
-                            color: Colors.grey.shade900,
-                            margin: const EdgeInsets.only(bottom: 12),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-                            child: Padding(
-                              padding: const EdgeInsets.all(16),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
+            child: _loggedMeals.isEmpty
+                ? const Center(child: Text("No meals logged today.", style: TextStyle(color: Colors.grey)))
+                : ListView.builder(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: _loggedMeals.length,
+                    itemBuilder: (context, index) {
+                      final meal = _loggedMeals[index];
+                      final macros = meal['macros'] ?? {};
+                      return Card(
+                        color: Colors.grey.shade900,
+                        margin: const EdgeInsets.only(bottom: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
                                 children: [
-                                  Row(
-                                    children: [
-                                      Expanded(
-                                        child: Text(
-                                          log['description'] ?? "Meal",
-                                          style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                      ),
-                                      Text("${log['calories']} kcal", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                                      const SizedBox(width: 10),
-                                      IconButton(
-                                        icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                                        onPressed: () => _deleteMeal(id, index),
-                                      ),
-                                    ],
+                                  Expanded(
+                                    child: Text(
+                                      meal['name'] ?? "Meal",
+                                      style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
                                   ),
-                                  const SizedBox(height: 10),
-                                  Row(
-                                    children: [
-                                      _buildSmallBadge("PRO ${macros['protein']}g", Colors.blue),
-                                      const SizedBox(width: 8),
-                                      _buildSmallBadge("CARB ${macros['carbs']}g", Colors.orange),
-                                      const SizedBox(width: 8),
-                                      _buildSmallBadge("FAT ${macros['fat']}g", Colors.red),
-                                    ],
+                                  Text("${meal['calories']} kcal", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                                  const SizedBox(width: 10),
+                                  IconButton(
+                                    icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                                    onPressed: () {
+                                      setState(() {
+                                        _loggedMeals.removeAt(index);
+                                      });
+                                      _saveMeals();
+                                    },
                                   ),
                                 ],
                               ),
-                            ),
-                          );
-                        },
-                      ),
+                              const SizedBox(height: 10),
+                              Row(
+                                children: [
+                                  _buildSmallBadge("PRO ${macros['protein']}g", Colors.blue),
+                                  const SizedBox(width: 8),
+                                  _buildSmallBadge("CARB ${macros['carbs']}g", Colors.orange),
+                                  const SizedBox(width: 8),
+                                  _buildSmallBadge("FAT ${macros['fat']}g", Colors.red),
+                                ],
+                              ),
+                              if (meal['source'] != null)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 8.0),
+                                  child: Text("Source: ${meal['source']}", style: const TextStyle(color: Colors.grey, fontSize: 10)),
+                                ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
           ),
         ],
       ),
@@ -300,3 +368,4 @@ class _MealLogScreenState extends State<MealLogScreen> {
     return Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: color.withOpacity(0.2), borderRadius: BorderRadius.circular(5)), child: Text(text, style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold)));
   }
 }
+ 
