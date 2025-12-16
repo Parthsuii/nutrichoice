@@ -17,7 +17,7 @@ class _MealLogScreenState extends State<MealLogScreen> {
   final TextEditingController _textController = TextEditingController();
   File? _image;
   bool _isAnalyzing = false;
-  String _statusMessage = "Scan a meal to track calories."; // Feedback state
+  String _statusMessage = "Scan a meal to track calories."; 
   List<Map<String, dynamic>> _loggedMeals = [];
 
   // Daily Totals
@@ -49,18 +49,34 @@ class _MealLogScreenState extends State<MealLogScreen> {
     _calculateTotals();
   }
 
-  void _calculateTotals() {
-    int cals = 0;
-    double p = 0, c = 0, f = 0;
-    for (var meal in _loggedMeals) {
-      cals += (meal['calories'] as num).toInt();
-      final macros = meal['macros'] ?? {};
-      p += (macros['protein'] as num?)?.toDouble() ?? 0;
-      c += (macros['carbs'] as num?)?.toDouble() ?? 0;
-      f += (macros['fat'] as num?)?.toDouble() ?? 0;
+  // --- CRITICAL FIX: SAFE PARSING HELPER ---
+  double _safeParse(dynamic value) {
+    if (value == null) return 0.0;
+    if (value is num) return value.toDouble();
+    if (value is String) {
+      // Remove any non-numeric characters (like "g", "kcal") just in case
+      String clean = value.replaceAll(RegExp(r'[^\d.]'), '');
+      return double.tryParse(clean) ?? 0.0;
     }
+    return 0.0;
+  }
+
+  void _calculateTotals() {
+    double cals = 0;
+    double p = 0, c = 0, f = 0;
+    
+    for (var meal in _loggedMeals) {
+      // Use _safeParse for everything to prevent crashes
+      cals += _safeParse(meal['calories']);
+      
+      final macros = meal['macros'] ?? {};
+      p += _safeParse(macros['protein']);
+      c += _safeParse(macros['carbs']);
+      f += _safeParse(macros['fat']);
+    }
+
     setState(() {
-      _totalCalories = cals;
+      _totalCalories = cals.toInt();
       _totalProtein = p;
       _totalCarbs = c;
       _totalFat = f;
@@ -85,7 +101,6 @@ class _MealLogScreenState extends State<MealLogScreen> {
   Future<void> _analyzeFood({File? imageFile, String? textQuery}) async {
     setState(() {
       _isAnalyzing = true;
-      // Inform user of the fallback chain
       _statusMessage = "Analyzing... (Gemini → Mistral → Moondream → Llama)";
     });
 
@@ -103,7 +118,6 @@ class _MealLogScreenState extends State<MealLogScreen> {
         request.fields['food_name'] = textQuery;
       }
 
-      // Extended timeout to 100s for fallback chain
       var streamedResponse = await request.send().timeout(
         const Duration(seconds: 100),
         onTimeout: () {
@@ -202,7 +216,6 @@ class _MealLogScreenState extends State<MealLogScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Status Box
                 if (_isAnalyzing || _statusMessage.contains("Identified") || _statusMessage.contains("Error"))
                   Container(
                     padding: const EdgeInsets.all(12),
@@ -336,11 +349,11 @@ class _MealLogScreenState extends State<MealLogScreen> {
                               const SizedBox(height: 10),
                               Row(
                                 children: [
-                                  _buildSmallBadge("PRO ${macros['protein']}g", Colors.blue),
+                                  _buildSmallBadge("PRO ${_safeParse(macros['protein']).round()}g", Colors.blue),
                                   const SizedBox(width: 8),
-                                  _buildSmallBadge("CARB ${macros['carbs']}g", Colors.orange),
+                                  _buildSmallBadge("CARB ${_safeParse(macros['carbs']).round()}g", Colors.orange),
                                   const SizedBox(width: 8),
-                                  _buildSmallBadge("FAT ${macros['fat']}g", Colors.red),
+                                  _buildSmallBadge("FAT ${_safeParse(macros['fat']).round()}g", Colors.red),
                                 ],
                               ),
                               if (meal['source'] != null)
@@ -368,4 +381,3 @@ class _MealLogScreenState extends State<MealLogScreen> {
     return Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: color.withOpacity(0.2), borderRadius: BorderRadius.circular(5)), child: Text(text, style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.bold)));
   }
 }
- 
