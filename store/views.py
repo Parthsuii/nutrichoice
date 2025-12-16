@@ -1,4 +1,4 @@
-import logging  # <--- NEW IMPORT
+import logging
 from rest_framework.decorators import api_view, parser_classes, authentication_classes, permission_classes
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -55,9 +55,7 @@ def safe_json_extract(text):
 
 # --- SAFETY NET FUNCTION ---
 def enrich_meal_data(meal):
-    """Ensures every meal has a recipe and valid nutrients."""
     if 'name' not in meal: meal['name'] = "Healthy Choice"
-    
     cals = meal.get('calories', 400)
     if isinstance(cals, str): 
         cals = int("".join(filter(str.isdigit, cals)) or 400)
@@ -70,8 +68,6 @@ def enrich_meal_data(meal):
         else: meal['recipe'] = ["Prep ingredients.", "Cook main protein.", "Combine sides.", "Serve warm."]
 
     nutrients = meal.get('nutrients', {})
-    
-    # Safe parse helper
     def get_val(v):
         if isinstance(v, (int, float)): return int(v)
         if isinstance(v, str) and v.isdigit(): return int(v)
@@ -94,14 +90,11 @@ def enrich_meal_data(meal):
             f = int(f * scale)
 
     meal['nutrients'] = { "protein": p, "fat": f, "carbs": c }
-    
     meal['protein'] = p
     meal['fat'] = f
     meal['carbs'] = c
-
     return meal
 
-# --- HELPER: GET USER (Hybrid Safety) ---
 def get_user_safe(request):
     if request.user.is_authenticated:
         return request.user
@@ -313,14 +306,17 @@ def swap_meal(request):
     return Response(enrich_meal_data({ "name": "Masala Oats", "calories": calories }))
 
 # =========================================================================
-# 3. SMART WORKOUT (Real AI Version)
+# 3. SMART WORKOUT (REAL AI VERSION - DEPLOYMENT V5)
 # =========================================================================
 @csrf_exempt
 @api_view(['POST'])
 def generate_workout(request):
+    # --- TRACER LOG: Proves the update is live ---
+    logger.info("--- 🚀 REAL AI DEPLOYMENT LIVE: Generating Workout... ---")
+    
     context_data = request.data.get('context', 'General Fitness')
-    logger.info(f"🏋️ WORKOUT REQ: {context_data}")
-
+    
+    # 2. Prompt for AI
     prompt = f"""
     Act as an elite Coach.
     CLIENT CONTEXT: {context_data}
@@ -336,6 +332,8 @@ def generate_workout(request):
     """
 
     plan_text = None
+    
+    # 3. Try AI Providers
     if GOOGLE_KEY:
         try:
             genai.configure(api_key=GOOGLE_KEY)
@@ -347,20 +345,26 @@ def generate_workout(request):
     if not plan_text and MISTRAL_KEY:
         try:
             client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=MISTRAL_KEY)
-            res = client.chat.completions.create(model="mistral-small-latest", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"})
+            res = client.chat.completions.create(
+                model="mistral-small-latest", 
+                messages=[{"role": "user", "content": prompt}], 
+                response_format={"type": "json_object"}
+            )
             plan_text = res.choices[0].message.content
         except Exception as e:
             logger.error(f"❌ Mistral Workout Failed: {e}")
 
+    # 4. Parse & Return
     if plan_text:
         data = safe_json_extract(plan_text)
         if data and "exercises" in data:
+            # Type Safety
             for ex in data.get("exercises", []):
                 try: ex["sets"] = int(ex.get("sets", 3))
                 except: ex["sets"] = 3
-            
             return Response(data)
 
+    # 5. Fallback
     logger.warning("⚠️ All AI Providers failed. Returning fallback workout.")
     return Response({
         "advice": "AI busy. Here is a balanced session.",
