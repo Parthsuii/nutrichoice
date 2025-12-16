@@ -23,4 +23,5 @@ urlpatterns = [
     path('profile/', views.user_profile_view, name='user-profile'),
     path('generate-meal-plan/', views.generate_meal_plan, name='generate-meal-plan'),
     path('swap-meal/', views.swap_meal, name='swap-meal'),
+    path('generate-workout/', views.generate_workout, name='generate_workout'),
 ]

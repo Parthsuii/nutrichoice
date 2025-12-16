@@ -24,7 +24,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
 
   // Data
   bool _isLoading = false;
-  List<dynamic> _workoutPlan = [];
+  List<Map<String, dynamic>> _workoutPlan = []; // Type-safe list
   String _aiAdvice = "Analyzing schedule & bio-data...";
   
   // Progress Tracking
@@ -36,7 +36,18 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
     _loadSmartData(); 
   }
 
-  // --- 1. SMART ANALYSIS (Bio + Schedule) ---
+  // --- HELPER: SANITIZE DATA ---
+  List<Map<String, dynamic>> _sanitizeWorkout(List<dynamic> raw) {
+    return raw.map<Map<String, dynamic>>((e) {
+      return {
+        'name': e['name']?.toString() ?? 'Exercise',
+        'sets': e['sets']?.toString() ?? '3',
+        'reps': e['reps']?.toString() ?? '10-12',
+      };
+    }).toList();
+  }
+
+  // --- 1. SMART ANALYSIS (Bio + Schedule + Soreness) ---
   Future<void> _loadSmartData() async {
     final prefs = await SharedPreferences.getInstance();
     _userGoal = prefs.getString('user_goal') ?? "Maintain";
@@ -46,7 +57,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
     double sleep = prefs.getDouble('last_sleep_hours') ?? 7.0;
     List<String> soreMuscles = prefs.getStringList('sore_muscles') ?? [];
 
-    // B. SCHEDULE CHECK (Safe Load)
+    // B. SCHEDULE CHECK
     String todayName = DateFormat('EEEE').format(DateTime.now());
     String? scheduleJson = prefs.getString('weekly_schedule');
     List<dynamic> todayEvents = [];
@@ -68,10 +79,22 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
       bool isFatigued = (reflex > 350 && reflex > 0) || sleep < 5.5;
       bool isCardioDay = (todayName == "Wednesday" || todayName == "Saturday") || isFatigued;
 
+      // Soreness Check
+      bool legsSore = soreMuscles.any((m) => 
+          m.toLowerCase().contains('leg') || 
+          m.toLowerCase().contains('quad') || 
+          m.toLowerCase().contains('hamstring') || 
+          m.toLowerCase().contains('calf')
+      );
+
       if (isFatigued) {
         _intensity = "Low (Recovery)";
         _workoutType = "Active Recovery / Yoga";
         _timeAvailable = 30;
+      } else if (legsSore && isCardioDay) {
+        _intensity = "Medium (Maintenance)";
+        _workoutType = "Upper Body Strength (Legs Sore)";
+        _timeAvailable = 45;
       } else if (isCardioDay) {
         _intensity = "Medium (Endurance)";
         _workoutType = "Cardio / HIIT";
@@ -88,7 +111,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
       } else {
         if (todayEvents.length > 4) {
           _suggestedTime = "Busy day. Aim for early morning (6-7 AM).";
-          _timeAvailable = 30;
+          if (_timeAvailable > 30) _timeAvailable = 30;
           _scheduleContext = "Heavy schedule detected.";
         } else {
           _suggestedTime = "Evening (5-7 PM) looks clear.";
@@ -104,15 +127,19 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
 
   Future<void> _loadSavedWorkout() async {
     final prefs = await SharedPreferences.getInstance();
+    
+    String currentKey = "$_intensity|$_workoutType|${_timeAvailable.round()}";
+    String? savedKey = prefs.getString('workout_context_key');
     String? savedJson = prefs.getString('current_workout_plan');
-    if (savedJson != null) {
+
+    if (savedKey == currentKey && savedJson != null) {
       try {
         final data = jsonDecode(savedJson);
         setState(() {
-          _workoutPlan = data['exercises'];
+          _workoutPlan = _sanitizeWorkout(data['exercises']);
           _aiAdvice = data['advice'] ?? _aiAdvice;
-          _timeAvailable = (data['time'] as num).toDouble();
-          _intensity = data['intensity'] ?? _intensity; // Load saved intensity too
+          // --- FIX 2: LOAD TYPE ---
+          _workoutType = data['type'] ?? _workoutType; 
           
           try {
             List<String> done = prefs.getStringList('workout_completed_indices') ?? [];
@@ -124,21 +151,32 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
       } catch (e) {
         print("Workout Data Corrupt: $e");
       }
+    } else {
+      print("Context changed (Old: $savedKey, New: $currentKey). Clearing cache.");
+      setState(() {
+        _workoutPlan = [];
+        _completedIndices.clear();
+      });
     }
   }
 
   Future<void> _saveWorkoutState() async {
     final prefs = await SharedPreferences.getInstance();
+    
     Map<String, dynamic> sessionData = {
       'exercises': _workoutPlan,
       'advice': _aiAdvice,
       'time': _timeAvailable,
-      'intensity': _intensity
+      'intensity': _intensity,
+      'type': _workoutType // --- FIX 2: SAVE TYPE ---
     };
     await prefs.setString('current_workout_plan', jsonEncode(sessionData));
     
     List<String> doneList = _completedIndices.map((e) => e.toString()).toList();
     await prefs.setStringList('workout_completed_indices', doneList);
+
+    String contextKey = "$_intensity|$_workoutType|${_timeAvailable.round()}";
+    await prefs.setString('workout_context_key', contextKey);
   }
 
   // --- 2. MANUAL TIME EDIT ---
@@ -149,24 +187,12 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
       builder: (ctx) => AlertDialog(
         backgroundColor: Colors.grey.shade900,
         title: const Text("Custom Duration", style: TextStyle(color: Colors.white)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text("Enter minutes:", style: TextStyle(color: Colors.grey)),
-            const SizedBox(height: 10),
-            TextField(
-              controller: timeController,
-              keyboardType: TextInputType.number,
-              autofocus: true,
-              style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
-              textAlign: TextAlign.center,
-              decoration: InputDecoration(
-                filled: true,
-                fillColor: Colors.black,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10))
-              ),
-            ),
-          ],
+        content: TextField(
+          controller: timeController,
+          keyboardType: TextInputType.number,
+          style: const TextStyle(color: Colors.white),
+          textAlign: TextAlign.center,
+          decoration: const InputDecoration(filled: true, fillColor: Colors.black),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancel")),
@@ -176,11 +202,10 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
               if (val != null && val > 0) {
                 setState(() {
                   _timeAvailable = val;
-                  // If plan exists, clear it because time changed
                   if (_workoutPlan.isNotEmpty) {
-                    _workoutPlan = [];
+                    _workoutPlan.clear();
                     _completedIndices.clear();
-                    _aiAdvice = "Duration updated. Tap Generate to update plan.";
+                    _aiAdvice = "Duration updated. Tap Generate.";
                   }
                 });
               }
@@ -196,6 +221,9 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
 
   // --- 3. AI GENERATION ---
   Future<void> _generateWorkout() async {
+    // --- FIX 3: PREVENT API SPAM ---
+    if (_isLoading) return; 
+
     setState(() {
       _isLoading = true;
       _completedIndices.clear();
@@ -209,7 +237,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
     Time Available: ${_timeAvailable.round()} mins. 
     Intensity: $_intensity.
     Focus Type: $_workoutType.
-    Schedule Context: $_scheduleContext (Suggest a workout that fits this energy level).
+    Schedule Context: $_scheduleContext.
     """;
     
     if (soreMuscles.isNotEmpty) {
@@ -228,18 +256,45 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         setState(() {
-          _workoutPlan = data['exercises'];
+          _workoutPlan = _sanitizeWorkout(data['exercises']);
           _aiAdvice = data['advice'];
           _isLoading = false;
         });
         _saveWorkoutState(); 
       } else {
-        _showError("Server Error: ${response.statusCode}");
+        _useOfflineFallback("Server error. Loaded offline backup.");
       }
     } catch (e) {
-      _showError("Connection Failed. Using Offline Backup.");
-      setState(() => _isLoading = false);
+      _useOfflineFallback("Connection failed. Loaded offline backup.");
     }
+  }
+
+  // --- 4. OFFLINE FALLBACK ---
+  void _useOfflineFallback(String msg) {
+    if (!mounted) return;
+    
+    List<Map<String, dynamic>> fallback = [
+      {"name": "Pushups", "sets": "3", "reps": "15"},
+      {"name": "Bodyweight Squats", "sets": "3", "reps": "20"},
+      {"name": "Plank", "sets": "3", "reps": "45 sec"},
+      {"name": "Jumping Jacks", "sets": "3", "reps": "50"},
+    ];
+
+    if (_timeAvailable < 20) {
+      fallback = [
+        {"name": "Burpees", "sets": "3", "reps": "10"},
+        {"name": "Mountain Climbers", "sets": "3", "reps": "30 sec"}
+      ];
+    }
+
+    setState(() {
+      _workoutPlan = fallback;
+      _aiAdvice = "Offline Mode: Simple bodyweight circuit.";
+      _isLoading = false;
+    });
+    _saveWorkoutState();
+    
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: Colors.orange));
   }
 
   void _toggleExercise(int index) {
@@ -262,20 +317,18 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('current_workout_plan');
     await prefs.remove('workout_completed_indices');
+    await prefs.remove('workout_context_key');
     _loadSmartData(); 
-  }
-
-  void _showError(String msg) {
-    if (!mounted) return;
-    setState(() => _isLoading = false);
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: Colors.red));
   }
 
   @override
   Widget build(BuildContext context) {
-    double progress = _workoutPlan.isEmpty ? 0 : _completedIndices.length / _workoutPlan.length;
+    // --- FIX 1: EXTRA SAFE PROGRESS DIVISION ---
+    double progress = (_workoutPlan.isEmpty) 
+        ? 0.0 
+        : _completedIndices.length / _workoutPlan.length;
 
-    // Safety check for slider visual
+    // Slider Bounds Safety
     double sliderValue = _timeAvailable;
     if (sliderValue < 10) sliderValue = 10;
     if (sliderValue > 120) sliderValue = 120; 
@@ -295,7 +348,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
       ),
       body: Column(
         children: [
-          // --- 1. CONFIGURATION DASHBOARD (ALWAYS VISIBLE) ---
+          // --- 1. CONFIGURATION DASHBOARD ---
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
@@ -305,7 +358,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Header
+                // Header Info
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -335,12 +388,11 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
                 ),
                 const SizedBox(height: 15),
                 
-                // CONTROLS (Always Visible)
+                // Time Controls
                 Row(
                   children: [
                     const Icon(Icons.timer, color: Colors.indigoAccent, size: 20),
                     const SizedBox(width: 10),
-                    // Manual Time Edit
                     InkWell(
                       onTap: _editTimeManually,
                       child: Container(
@@ -364,7 +416,12 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
                         onChanged: (val) {
                           setState(() {
                             _timeAvailable = val;
-                            // Optional: Clear plan if dragging slider? Or just let user hit Regenerate.
+                            // Clear plan if time changes to force regen
+                            if (_workoutPlan.isNotEmpty) {
+                                _workoutPlan.clear();
+                                _completedIndices.clear();
+                                _aiAdvice = "Time changed. Tap Generate.";
+                            }
                           });
                         },
                       ),
@@ -386,7 +443,17 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
                           style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
                           items: ["Low (Recovery)", "Medium (Endurance)", "High (Performance)"]
                               .map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
-                          onChanged: (val) => setState(() => _intensity = val!),
+                          onChanged: (val) {
+                              setState(() {
+                                  _intensity = val!;
+                                  // Clear plan if intensity changes
+                                  if (_workoutPlan.isNotEmpty) {
+                                      _workoutPlan.clear();
+                                      _completedIndices.clear();
+                                      _aiAdvice = "Intensity changed. Tap Generate.";
+                                  }
+                              });
+                          },
                         ),
                       ),
                     ),
@@ -395,7 +462,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
 
                 const SizedBox(height: 10),
                 
-                // Generate/Regenerate Button
+                // Generate Button
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton.icon(
@@ -413,7 +480,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
             ),
           ),
 
-          // --- 2. PROGRESS ---
+          // --- 2. PROGRESS BAR ---
           if (_workoutPlan.isNotEmpty)
             LinearProgressIndicator(
               value: progress,
@@ -442,7 +509,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
                     : ListView(
                         padding: const EdgeInsets.all(16),
                         children: [
-                          // Advice
+                          // Advice Box
                           Container(
                             padding: const EdgeInsets.all(15),
                             margin: const EdgeInsets.only(bottom: 20),
@@ -463,7 +530,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
                           const Text("ROUTINE", style: TextStyle(color: Colors.grey, fontSize: 11, fontWeight: FontWeight.bold)),
                           const SizedBox(height: 10),
 
-                          // List
+                          // Exercise Items
                           ..._workoutPlan.asMap().entries.map((entry) {
                             int index = entry.key;
                             var ex = entry.value;

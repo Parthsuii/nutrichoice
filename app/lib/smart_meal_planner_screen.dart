@@ -30,6 +30,13 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
   final TextEditingController _ingredientController = TextEditingController();
   final List<String> _availableIngredients = [];
 
+  // Helper for Safe Parsing (Prevents Null Crashes)
+  int _safeInt(dynamic val) {
+    if (val == null) return 0;
+    if (val is int) return val;
+    return int.tryParse(val.toString()) ?? 0;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -41,7 +48,6 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
 
-    // Load User Stats
     setState(() {
       _userGoal = prefs.getString('user_goal') ?? "Maintain";
       int dynamicCal = prefs.getInt('dynamic_calorie_target') ?? 0;
@@ -50,18 +56,20 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
     });
 
     String todayDate = DateTime.now().toIso8601String().split('T')[0];
+    String currentKey = "${_selectedContext}_${_dailyCalories}_${_availableIngredients.join(',')}";
+    
     String? savedDate = prefs.getString('saved_plan_date');
+    String? savedKey = prefs.getString('saved_plan_key');
     String? savedMeals = prefs.getString('saved_plan_json');
 
-    // If we have a plan for TODAY, load it. Otherwise, generate new.
-    if (savedDate == todayDate && savedMeals != null) {
-      print("📅 Loading saved plan for today...");
+    // Load Cache ONLY if Key Matches (prevents stale data)
+    if (savedDate == todayDate && savedKey == currentKey && savedMeals != null) {
+      print("📅 Loading cached plan...");
       setState(() {
         _meals = jsonDecode(savedMeals);
-        _selectedContext = prefs.getString('saved_plan_context') ?? "Standard Day";
       });
     } else {
-      print("🧠 Generating NEW AI Plan...");
+      print("🧠 Generating NEW Plan (Cache Miss)...");
       _generateFullPlan();
     }
   }
@@ -69,11 +77,9 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
   // --- 2. CALL BACKEND (Generate) ---
   Future<void> _generateFullPlan() async {
     setState(() => _isLoading = true);
-    
     try {
       final prefs = await SharedPreferences.getInstance();
       
-      // CALL API SERVICE
       final data = await ApiService.generateMealPlan(
         goal: _userGoal,
         calories: _dailyCalories,
@@ -89,19 +95,18 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
           _isLoading = false;
         });
 
-        // Save to Local Storage (Cache)
         String todayDate = DateTime.now().toIso8601String().split('T')[0];
+        String currentKey = "${_selectedContext}_${_dailyCalories}_${_availableIngredients.join(',')}";
+        
         await prefs.setString('saved_plan_date', todayDate);
+        await prefs.setString('saved_plan_key', currentKey);
         await prefs.setString('saved_plan_json', jsonEncode(_meals));
-        await prefs.setString('saved_plan_context', _selectedContext);
       } else {
-         // Handle empty response
          setState(() => _isLoading = false);
          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("AI is busy. Try again.")));
       }
     } catch (e) {
       if (!mounted) return;
-      print("Plan Error: $e");
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));
       setState(() => _isLoading = false);
     }
@@ -112,11 +117,10 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Chef is cooking up a swap...")));
     try {
       final oldMealName = _meals[index]['name'] ?? "Meal";
-      final targetCals = _meals[index]['calories'] ?? 500;
+      final targetCals = _safeInt(_meals[index]['calories']);
 
-      // CALL API SERVICE
       final newMeal = await ApiService.swapMeal(
-        goal: oldMealName, // Passing old name as context
+        goal: oldMealName, 
         calories: targetCals,
         context: _selectedContext,
       );
@@ -124,8 +128,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
       if (!mounted) return;
 
       setState(() {
-        // Keep the old time/type, update content
-        newMeal['time'] = _meals[index]['time']; 
+        newMeal['time'] = _meals[index]['time']; // Keep old time
         _meals[index] = newMeal;
       });
       
@@ -138,10 +141,12 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
     }
   }
 
-  // Blinkit / Grocery Link
-  Future<void> _checkPrice(String ingredient) async {
-    String query = ingredient.replaceAll(" ", "%20");
-    Uri url = Uri.parse("https://blinkit.com/s/?q=$query");
+  Future<void> _checkPrice(dynamic meal) async {
+    String query = meal['name'] ?? "Groceries";
+    if (meal['ingredients'] != null && (meal['ingredients'] as List).isNotEmpty) {
+      query = meal['ingredients'][0];
+    }
+    Uri url = Uri.parse("https://blinkit.com/s/?q=${query.replaceAll(" ", "%20")}");
     if (!await launchUrl(url, mode: LaunchMode.externalApplication)) {
       if(!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Could not open store.")));
@@ -155,11 +160,15 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
         _availableIngredients.add(text);
         _ingredientController.clear();
       });
+      _generateFullPlan();
     }
   }
 
   void _removeIngredient(String item) {
-    setState(() => _availableIngredients.remove(item));
+    setState(() {
+      _availableIngredients.remove(item);
+    });
+    _generateFullPlan();
   }
 
   void _showChatSheet() {
@@ -209,13 +218,12 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Dropdown
                 DropdownButtonFormField<String>(
-                  initialValue: _contextOptions.contains(_selectedContext) ? _selectedContext : _contextOptions[0],
+                  value: _contextOptions.contains(_selectedContext) ? _selectedContext : _contextOptions[0],
                   dropdownColor: Colors.grey.shade800,
                   style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
                   decoration: const InputDecoration(
-                    labelText: "Today's Context", 
+                    labelText: "Today's Goal", 
                     labelStyle: TextStyle(color: Colors.teal),
                     border: OutlineInputBorder(),
                     enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
@@ -223,14 +231,10 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
                   items: _contextOptions.map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
                   onChanged: (val) {
                     setState(() => _selectedContext = val!);
-                    // Auto-regenerate when context changes
                     _generateFullPlan();
                   },
                 ),
-                
                 const SizedBox(height: 10),
-                
-                // Ingredient Input
                 Row(
                   children: [
                     Expanded(
@@ -252,8 +256,6 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
                     IconButton(icon: const Icon(Icons.add_circle, color: Colors.teal, size: 30), onPressed: _addIngredient),
                   ],
                 ),
-                
-                // Chips
                 if (_availableIngredients.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 8.0),
@@ -290,6 +292,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
                         itemCount: _meals.length,
                         itemBuilder: (context, index) {
                           final meal = _meals[index];
+                          final ingredients = meal['ingredients'] as List?;
                           
                           return Card(
                             color: Colors.grey.shade900,
@@ -311,7 +314,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
                                         decoration: BoxDecoration(color: Colors.teal.withOpacity(0.2), borderRadius: BorderRadius.circular(5)),
                                         child: Text(meal['time'] ?? "Meal", style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold, fontSize: 12)),
                                       ),
-                                      Text("${meal['calories']} kcal", style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold)),
+                                      Text("${_safeInt(meal['calories'])} kcal", style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold)),
                                     ],
                                   ),
                                   const SizedBox(height: 8),
@@ -321,7 +324,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
                                   ),
                                   const SizedBox(height: 15),
                                   
-                                  // Macros Row
+                                  // Macros
                                   Container(
                                     padding: const EdgeInsets.symmetric(vertical: 10),
                                     decoration: BoxDecoration(
@@ -331,31 +334,69 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
                                     child: Row(
                                       mainAxisAlignment: MainAxisAlignment.spaceAround,
                                       children: [
-                                        _nutrientBadge("PRO", "${meal['protein']}g", Colors.blue),
-                                        _nutrientBadge("CARBS", "${meal['carbs']}g", Colors.orange),
-                                        _nutrientBadge("FAT", "${meal['fat']}g", Colors.red),
+                                        _nutrientBadge("PRO", "${_safeInt(meal['protein'])}g", Colors.blue),
+                                        _nutrientBadge("CARBS", "${_safeInt(meal['carbs'])}g", Colors.orange),
+                                        _nutrientBadge("FAT", "${_safeInt(meal['fat'])}g", Colors.red),
                                       ],
                                     ),
                                   ),
                                   
-                                  const SizedBox(height: 10),
+                                  const SizedBox(height: 15),
+
+                                  // --- NEW: INGREDIENTS LIST ---
+                                  if (ingredients != null && ingredients.isNotEmpty) ...[
+                                    const Text("Ingredients needed:", style: TextStyle(color: Colors.white60, fontSize: 12)),
+                                    const SizedBox(height: 5),
+                                    Wrap(
+                                      spacing: 6,
+                                      runSpacing: 6,
+                                      children: ingredients.map<Widget>((ing) => 
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white10,
+                                            borderRadius: BorderRadius.circular(8),
+                                            border: Border.all(color: Colors.white24, width: 0.5)
+                                          ),
+                                          child: Text(ing.toString(), style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                                        )
+                                      ).toList(),
+                                    ),
+                                    const SizedBox(height: 10),
+                                  ],
+
+                                  // Recipe Expandable
+                                  if (meal['recipe'] != null && (meal['recipe'] as List).isNotEmpty)
+                                    ExpansionTile(
+                                      tilePadding: EdgeInsets.zero,
+                                      title: const Text("View Recipe Steps", style: TextStyle(color: Colors.tealAccent, fontSize: 14)),
+                                      children: (meal['recipe'] as List).map<Widget>((step) => 
+                                        ListTile(
+                                          leading: const Icon(Icons.circle, size: 6, color: Colors.white54),
+                                          title: Text(step.toString(), style: const TextStyle(color: Colors.white70, fontSize: 13)),
+                                          dense: true,
+                                          visualDensity: VisualDensity.compact,
+                                        )
+                                      ).toList(),
+                                    ),
                                   
-                                  // Action Buttons
+                                  // Actions
+                                  const SizedBox(height: 10),
                                   Row(
                                     mainAxisAlignment: MainAxisAlignment.end,
                                     children: [
-                                       TextButton.icon(
+                                        TextButton.icon(
                                          icon: const Icon(Icons.shopping_cart, size: 16, color: Colors.greenAccent),
                                          label: const Text("Order Items", style: TextStyle(color: Colors.greenAccent)),
-                                         onPressed: () => _checkPrice(meal['name']),
-                                       ),
-                                       const SizedBox(width: 8),
-                                       OutlinedButton.icon(
+                                         onPressed: () => _checkPrice(meal),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        OutlinedButton.icon(
                                          icon: const Icon(Icons.swap_horiz, size: 16, color: Colors.white70),
                                          label: const Text("Swap", style: TextStyle(color: Colors.white70)),
                                          onPressed: () => _swapSingleMeal(index),
                                          style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24)),
-                                       ),
+                                        ),
                                     ],
                                   )
                                 ],
@@ -380,7 +421,7 @@ class _SmartMealPlannerScreenState extends State<SmartMealPlannerScreen> {
   }
 }
 
-// --- CHEF CHAT WIDGET ---
+// --- CHEF CHAT WIDGET (Unchanged) ---
 class ChefChatWidget extends StatefulWidget {
   const ChefChatWidget({super.key});
 
