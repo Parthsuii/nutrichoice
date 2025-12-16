@@ -31,7 +31,7 @@ SITE_URL = "https://nutrichoice.onrender.com"
 APP_NAME = "NutriChoice"
 
 # --- LOGGER SETUP ---
-logger = logging.getLogger(__name__)  # <--- NEW LOGGER INSTANCE
+logger = logging.getLogger(__name__)
 
 # --- HELPERS ---
 def normalize_food_name(name):
@@ -108,7 +108,7 @@ def get_user_safe(request):
     return User.objects.first()
 
 # =========================================================================
-# 1. SMART SCANNER (With Logging)
+# 1. SMART SCANNER
 # =========================================================================
 @method_decorator(csrf_exempt, name='dispatch')
 class ScanFoodView(APIView):
@@ -195,7 +195,7 @@ class ScanFoodView(APIView):
         return Response({"error": "Scan failed"}, 422)
 
 # =========================================================================
-# 2. SMART MEAL PLANNER (With Logging)
+# 2. SMART MEAL PLANNER
 # =========================================================================
 @csrf_exempt
 @api_view(['POST'])
@@ -313,7 +313,7 @@ def swap_meal(request):
     return Response(enrich_meal_data({ "name": "Masala Oats", "calories": calories }))
 
 # =========================================================================
-# 3. SMART WORKOUT (With Logging)
+# 3. SMART WORKOUT (Real AI Version)
 # =========================================================================
 @csrf_exempt
 @api_view(['POST'])
@@ -372,7 +372,7 @@ def generate_workout(request):
     })
 
 # ==========================================
-# 4. ROSTER ANALYZER (With Logging)
+# 4. ROSTER ANALYZER
 # ==========================================
 @method_decorator(csrf_exempt, name='dispatch') 
 class AnalyzeRosterView(APIView):

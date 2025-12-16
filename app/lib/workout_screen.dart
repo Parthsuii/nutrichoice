@@ -24,7 +24,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
 
   // Data
   bool _isLoading = false;
-  List<Map<String, dynamic>> _workoutPlan = []; // Type-safe list
+  List<Map<String, dynamic>> _workoutPlan = []; 
   String _aiAdvice = "Analyzing schedule & bio-data...";
   
   // Progress Tracking
@@ -47,17 +47,17 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
     }).toList();
   }
 
-  // --- 1. SMART ANALYSIS (Bio + Schedule + Soreness) ---
+  // --- 1. SMART ANALYSIS ---
   Future<void> _loadSmartData() async {
     final prefs = await SharedPreferences.getInstance();
     _userGoal = prefs.getString('user_goal') ?? "Maintain";
     
-    // A. BIO-DATA CHECK
+    // Bio-Data
     int reflex = prefs.getInt('last_reflex_score') ?? 0;
     double sleep = prefs.getDouble('last_sleep_hours') ?? 7.0;
     List<String> soreMuscles = prefs.getStringList('sore_muscles') ?? [];
 
-    // B. SCHEDULE CHECK
+    // Schedule
     String todayName = DateFormat('EEEE').format(DateTime.now());
     String? scheduleJson = prefs.getString('weekly_schedule');
     List<dynamic> todayEvents = [];
@@ -73,19 +73,12 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
       }
     }
 
-    // C. LOGIC ENGINE
+    // Logic Engine
     if (!mounted) return;
     setState(() {
       bool isFatigued = (reflex > 350 && reflex > 0) || sleep < 5.5;
       bool isCardioDay = (todayName == "Wednesday" || todayName == "Saturday") || isFatigued;
-
-      // Soreness Check
-      bool legsSore = soreMuscles.any((m) => 
-          m.toLowerCase().contains('leg') || 
-          m.toLowerCase().contains('quad') || 
-          m.toLowerCase().contains('hamstring') || 
-          m.toLowerCase().contains('calf')
-      );
+      bool legsSore = soreMuscles.any((m) => m.toLowerCase().contains('leg') || m.toLowerCase().contains('quad'));
 
       if (isFatigued) {
         _intensity = "Low (Recovery)";
@@ -110,11 +103,11 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
         _scheduleContext = "No events found.";
       } else {
         if (todayEvents.length > 4) {
-          _suggestedTime = "Busy day. Aim for early morning (6-7 AM).";
+          _suggestedTime = "Busy day. Aim for early morning.";
           if (_timeAvailable > 30) _timeAvailable = 30;
           _scheduleContext = "Heavy schedule detected.";
         } else {
-          _suggestedTime = "Evening (5-7 PM) looks clear.";
+          _suggestedTime = "Evening looks clear.";
           _scheduleContext = "Light schedule detected.";
         }
       }
@@ -125,6 +118,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
     _loadSavedWorkout();
   }
 
+  // --- 2. LOAD SAVED OR AUTO-GENERATE ---
   Future<void> _loadSavedWorkout() async {
     final prefs = await SharedPreferences.getInstance();
     
@@ -133,12 +127,12 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
     String? savedJson = prefs.getString('current_workout_plan');
 
     if (savedKey == currentKey && savedJson != null) {
+      // Keys match -> Load from Cache
       try {
         final data = jsonDecode(savedJson);
         setState(() {
           _workoutPlan = _sanitizeWorkout(data['exercises']);
           _aiAdvice = data['advice'] ?? _aiAdvice;
-          // --- FIX 2: LOAD TYPE ---
           _workoutType = data['type'] ?? _workoutType; 
           
           try {
@@ -152,23 +146,26 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
         print("Workout Data Corrupt: $e");
       }
     } else {
-      print("Context changed (Old: $savedKey, New: $currentKey). Clearing cache.");
+      // Keys mismatch -> Clear Cache & FETCH NEW
+      print("Context changed (Old: $savedKey, New: $currentKey). Auto-generating...");
+      
       setState(() {
         _workoutPlan = [];
         _completedIndices.clear();
       });
+
+      _generateWorkout(); 
     }
   }
 
   Future<void> _saveWorkoutState() async {
     final prefs = await SharedPreferences.getInstance();
-    
     Map<String, dynamic> sessionData = {
       'exercises': _workoutPlan,
       'advice': _aiAdvice,
       'time': _timeAvailable,
       'intensity': _intensity,
-      'type': _workoutType // --- FIX 2: SAVE TYPE ---
+      'type': _workoutType
     };
     await prefs.setString('current_workout_plan', jsonEncode(sessionData));
     
@@ -179,7 +176,6 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
     await prefs.setString('workout_context_key', contextKey);
   }
 
-  // --- 2. MANUAL TIME EDIT ---
   void _editTimeManually() {
     TextEditingController timeController = TextEditingController(text: _timeAvailable.round().toString());
     showDialog(
@@ -219,10 +215,11 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
     );
   }
 
-  // --- 3. AI GENERATION ---
+  // --- 3. AI GENERATION (Fixed: Null Safety) ---
   Future<void> _generateWorkout() async {
-    // --- FIX 3: PREVENT API SPAM ---
     if (_isLoading) return; 
+
+    print("🚀 CALLING BACKEND: Generating Workout..."); 
 
     setState(() {
       _isLoading = true;
@@ -246,7 +243,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
 
     try {
       final response = await http.post(
-        Uri.parse('https://nutrichoice-xvpf.onrender.com/generate-workout/'),
+        Uri.parse('https://nutrichoice-xvpf.onrender.com/generate-workout/'), 
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({"context": promptContext}),
       );
@@ -255,21 +252,28 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        setState(() {
-          _workoutPlan = _sanitizeWorkout(data['exercises']);
-          _aiAdvice = data['advice'];
-          _isLoading = false;
-        });
-        _saveWorkoutState(); 
+        
+        // --- FIX: Check if 'exercises' exists and is actually a list ---
+        if (data['exercises'] != null && data['exercises'] is List) {
+          setState(() {
+            _workoutPlan = _sanitizeWorkout(data['exercises']);
+            _aiAdvice = data['advice'] ?? "Plan generated successfully.";
+            _isLoading = false;
+          });
+          _saveWorkoutState();
+        } else {
+          print("⚠️ Backend returned invalid format: $data");
+          _useOfflineFallback("AI format error. Using backup.");
+        }
       } else {
-        _useOfflineFallback("Server error. Loaded offline backup.");
+        _useOfflineFallback("Server error (${response.statusCode}). Using backup.");
       }
     } catch (e) {
-      _useOfflineFallback("Connection failed. Loaded offline backup.");
+      print("Network Error: $e");
+      _useOfflineFallback("Connection failed. Using backup.");
     }
   }
 
-  // --- 4. OFFLINE FALLBACK ---
   void _useOfflineFallback(String msg) {
     if (!mounted) return;
     
@@ -323,12 +327,10 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // --- FIX 1: EXTRA SAFE PROGRESS DIVISION ---
     double progress = (_workoutPlan.isEmpty) 
         ? 0.0 
         : _completedIndices.length / _workoutPlan.length;
 
-    // Slider Bounds Safety
     double sliderValue = _timeAvailable;
     if (sliderValue < 10) sliderValue = 10;
     if (sliderValue > 120) sliderValue = 120; 
@@ -348,7 +350,6 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
       ),
       body: Column(
         children: [
-          // --- 1. CONFIGURATION DASHBOARD ---
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
@@ -358,7 +359,6 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Header Info
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -367,12 +367,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text("TODAY'S FOCUS", style: TextStyle(color: Colors.grey[400], fontSize: 10, fontWeight: FontWeight.bold)),
-                          Text(
-                            _workoutType, 
-                            style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
-                            overflow: TextOverflow.ellipsis,
-                            maxLines: 1,
-                          ),
+                          Text(_workoutType, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis, maxLines: 1),
                         ],
                       ),
                     ),
@@ -387,8 +382,6 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
                   ],
                 ),
                 const SizedBox(height: 15),
-                
-                // Time Controls
                 Row(
                   children: [
                     const Icon(Icons.timer, color: Colors.indigoAccent, size: 20),
@@ -397,30 +390,19 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
                       onTap: _editTimeManually,
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          border: Border.all(color: Colors.white24),
-                          borderRadius: BorderRadius.circular(5)
-                        ),
-                        child: Text(
-                          "${_timeAvailable.round()} min ✎", 
-                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)
-                        ),
+                        decoration: BoxDecoration(border: Border.all(color: Colors.white24), borderRadius: BorderRadius.circular(5)),
+                        child: Text("${_timeAvailable.round()} min ✎", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
                       ),
                     ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Slider(
-                        value: sliderValue,
-                        min: 10, max: 120, 
-                        activeColor: Colors.indigoAccent,
+                        value: sliderValue, min: 10, max: 120, activeColor: Colors.indigoAccent,
                         onChanged: (val) {
                           setState(() {
                             _timeAvailable = val;
-                            // Clear plan if time changes to force regen
                             if (_workoutPlan.isNotEmpty) {
-                                _workoutPlan.clear();
-                                _completedIndices.clear();
-                                _aiAdvice = "Time changed. Tap Generate.";
+                                _workoutPlan.clear(); _completedIndices.clear(); _aiAdvice = "Time changed. Tap Generate.";
                             }
                           });
                         },
@@ -428,8 +410,6 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
                     ),
                   ],
                 ),
-                
-                // Intensity Dropdown
                 Row(
                   children: [
                     const Icon(Icons.speed, color: Colors.indigoAccent, size: 20),
@@ -441,16 +421,12 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
                           dropdownColor: Colors.grey.shade900,
                           isDense: true,
                           style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                          items: ["Low (Recovery)", "Medium (Endurance)", "High (Performance)"]
-                              .map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
+                          items: ["Low (Recovery)", "Medium (Endurance)", "High (Performance)"].map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
                           onChanged: (val) {
                               setState(() {
                                   _intensity = val!;
-                                  // Clear plan if intensity changes
                                   if (_workoutPlan.isNotEmpty) {
-                                      _workoutPlan.clear();
-                                      _completedIndices.clear();
-                                      _aiAdvice = "Intensity changed. Tap Generate.";
+                                      _workoutPlan.clear(); _completedIndices.clear(); _aiAdvice = "Intensity changed. Tap Generate.";
                                   }
                               });
                           },
@@ -459,121 +435,51 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
                     ),
                   ],
                 ),
-
                 const SizedBox(height: 10),
-                
-                // Generate Button
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton.icon(
                     onPressed: _generateWorkout,
                     icon: Icon(_workoutPlan.isEmpty ? Icons.bolt : Icons.refresh),
                     label: Text(_workoutPlan.isEmpty ? "GENERATE WORKOUT" : "REGENERATE PLAN"),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.indigoAccent,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.indigoAccent, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 12)),
                   ),
                 ),
               ],
             ),
           ),
-
-          // --- 2. PROGRESS BAR ---
+          
           if (_workoutPlan.isNotEmpty)
-            LinearProgressIndicator(
-              value: progress,
-              backgroundColor: Colors.black,
-              valueColor: AlwaysStoppedAnimation<Color>(
-                progress == 1.0 ? Colors.greenAccent : Colors.indigo
-              ),
-              minHeight: 4,
-            ),
+            LinearProgressIndicator(value: progress, backgroundColor: Colors.black, valueColor: AlwaysStoppedAnimation<Color>(progress == 1.0 ? Colors.greenAccent : Colors.indigo), minHeight: 4),
 
-          // --- 3. EXERCISE LIST ---
           Expanded(
             child: _isLoading
                 ? const Center(child: CircularProgressIndicator(color: Colors.indigoAccent))
                 : _workoutPlan.isEmpty
-                    ? const Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.fitness_center, size: 60, color: Colors.white10),
-                            SizedBox(height: 10),
-                            Text("Configure & Generate", style: TextStyle(color: Colors.white24)),
-                          ],
-                        ),
-                      )
+                    ? const Center(child: Text("Configure & Generate", style: TextStyle(color: Colors.white24)))
                     : ListView(
                         padding: const EdgeInsets.all(16),
                         children: [
-                          // Advice Box
                           Container(
                             padding: const EdgeInsets.all(15),
                             margin: const EdgeInsets.only(bottom: 20),
-                            decoration: BoxDecoration(
-                              color: Colors.indigo.withOpacity(0.15),
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: Colors.indigo.withOpacity(0.3))
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.psychology, color: Colors.indigoAccent, size: 20),
-                                const SizedBox(width: 12),
-                                Expanded(child: Text(_aiAdvice, style: const TextStyle(color: Colors.white70, fontSize: 13))),
-                              ],
-                            ),
+                            decoration: BoxDecoration(color: Colors.indigo.withOpacity(0.15), borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.indigo.withOpacity(0.3))),
+                            child: Row(children: [const Icon(Icons.psychology, color: Colors.indigoAccent, size: 20), const SizedBox(width: 12), Expanded(child: Text(_aiAdvice, style: const TextStyle(color: Colors.white70, fontSize: 13)))]),
                           ),
-
-                          const Text("ROUTINE", style: TextStyle(color: Colors.grey, fontSize: 11, fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 10),
-
-                          // Exercise Items
                           ..._workoutPlan.asMap().entries.map((entry) {
                             int index = entry.key;
                             var ex = entry.value;
                             bool isDone = _completedIndices.contains(index);
-
                             return AnimatedContainer(
                               duration: const Duration(milliseconds: 300),
                               margin: const EdgeInsets.only(bottom: 10),
-                              decoration: BoxDecoration(
-                                color: isDone ? Colors.green.withOpacity(0.05) : Colors.grey.shade900,
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: isDone ? Colors.green.withOpacity(0.3) : Colors.transparent
-                                )
-                              ),
+                              decoration: BoxDecoration(color: isDone ? Colors.green.withOpacity(0.05) : Colors.grey.shade900, borderRadius: BorderRadius.circular(12), border: Border.all(color: isDone ? Colors.green.withOpacity(0.3) : Colors.transparent)),
                               child: ListTile(
                                 onTap: () => _toggleExercise(index),
-                                leading: CircleAvatar(
-                                  radius: 14,
-                                  backgroundColor: isDone ? Colors.green : Colors.grey.shade800,
-                                  child: isDone 
-                                    ? const Icon(Icons.check, size: 16, color: Colors.white)
-                                    : Text("${index + 1}", style: const TextStyle(color: Colors.white70, fontSize: 12)),
-                                ),
-                                title: Text(
-                                  ex['name'],
-                                  style: TextStyle(
-                                    color: isDone ? Colors.white38 : Colors.white,
-                                    fontWeight: isDone ? FontWeight.normal : FontWeight.w600,
-                                    decoration: isDone ? TextDecoration.lineThrough : null,
-                                  ),
-                                ),
-                                subtitle: Text(
-                                  "${ex['sets']} Sets  •  ${ex['reps']}",
-                                  style: TextStyle(color: isDone ? Colors.white24 : Colors.indigoAccent),
-                                ),
-                                trailing: Checkbox(
-                                  value: isDone,
-                                  activeColor: Colors.green,
-                                  checkColor: Colors.black,
-                                  side: BorderSide(color: Colors.grey.shade700),
-                                  onChanged: (val) => _toggleExercise(index),
-                                ),
+                                leading: CircleAvatar(radius: 14, backgroundColor: isDone ? Colors.green : Colors.grey.shade800, child: isDone ? const Icon(Icons.check, size: 16, color: Colors.white) : Text("${index + 1}", style: const TextStyle(color: Colors.white70, fontSize: 12))),
+                                title: Text(ex['name'], style: TextStyle(color: isDone ? Colors.white38 : Colors.white, fontWeight: isDone ? FontWeight.normal : FontWeight.w600, decoration: isDone ? TextDecoration.lineThrough : null)),
+                                subtitle: Text("${ex['sets']} Sets • ${ex['reps']}", style: TextStyle(color: isDone ? Colors.white24 : Colors.indigoAccent)),
+                                trailing: Checkbox(value: isDone, activeColor: Colors.green, checkColor: Colors.black, side: BorderSide(color: Colors.grey.shade700), onChanged: (val) => _toggleExercise(index)),
                               ),
                             );
                           }),
